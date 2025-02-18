@@ -50,10 +50,10 @@ def main(
     total_test_output = []
     total_test_name = 'test_output_' + str(round_num) + '.pt'
     total_date_pid_name = 'test_date_pid_' + str(round_num) + '.pt'
-    save_path = "/home/datamake117/Documents/haris/DL/" + main_folder_name
+    save_path = "/home/datamake117/data/haris/DL/" + main_folder_name
     
     # 根据给定的时间范围 dt1 到 dt3，选出训练集的日期列表。之后，有一个特别的日期范围处理（过滤掉指定日期段的训练数据）。
-    # 删除空值（去除预测目标中为空值的样本） TODO: 没看懂这个逻辑
+    # 删除空值（去除预测目标中为空值的样本）
     date_list_train = total_date_list[np.where((total_date_list >= dt1) & (total_date_list < dt3))[0]]
     if pd.to_datetime("2024-02-23") >= dt1 and pd.to_datetime("2024-02-23") <= dt3:
         date_list_train = np.array([date_train for date_train in date_list_train if date_train < pd.to_datetime("2024-02-01") or date_train > pd.to_datetime("2024-02-23")])
@@ -151,14 +151,16 @@ def main(
 if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
     main_device_name = 0
-    factor = pd.read_pickle('/home/datamake117/test1101/Data/all_feature/total_date.pkl')
-    grouped = pd.read_pickle('/home/datamake117/test1101/Data/all_feature/grouped_adj3.pkl').fillna(0)
-    grouped_label = pd.read_pickle('/home/datamake117/test1101/Data/all_feature/grouped_label_adj3.pkl')
-    grouped_liquidity = pd.read_pickle('/home/datamake117/test1101/Data/all_feature/grouped_liquidity.pkl')
-    correlation_df = pd.read_pickle('/home/datamake117/test1101/Data/辅助数据/corr_byday_abs3.pkl')
-    total_date_list = np.array(factor['date'].drop_duplicates().tolist())
+    print('Read Factor.')
+    factor = pd.read_pickle('/home/datamake117/data/haris/dataset/total_date.pkl')                      # 日期+股票代码
+    grouped = pd.read_pickle('/home/datamake117/data/haris/dataset/grouped_adj.pkl').fillna(0)          # 特征
+    grouped_label = pd.read_pickle('/home/datamake117/data/haris/dataset/grouped_label_adj.pkl')        # 标签
+    grouped_liquidity = pd.read_pickle('/home/datamake117/data/haris/dataset/grouped_liquidity.pkl')    # 流动性指标
+    correlation_df = pd.read_pickle('/home/datamake117/data/haris/dataset/corr_byday_abs.pkl')          # 因子筛选辅助数据
+    total_date_list = np.array(factor['date'].drop_duplicates().tolist())                               # 日期列表
 
     # 第1轮
+    print('Round 1.')
     round_num = 1
     dt1 = pd.to_datetime("2020-07-01")  # 训练集开始时间
     dt2 = pd.to_datetime("2022-07-01")  # 验证集开始时间
@@ -174,21 +176,22 @@ if __name__ == "__main__":
     torch.cuda.empty_cache()
     gc.collect()
 
-    test_output1 = torch.load("/home/datamake117/Documents/haris/DL/" + main_folder_name + "/test_output_1.pt")
+    test_output1 = torch.load("/home/datamake117/data/haris/DL/" + main_folder_name + "/test_output_1.pt")
     test_output = torch.cat([test_output1])
     test_output = test_output.cpu()
-    date_pid1 = torch.load("/home/datamake117/Documents/haris/DL/" + main_folder_name + "/test_date_pid_1.pt")
+    date_pid1 = torch.load("/home/datamake117/data/haris/DL/" + main_folder_name + "/test_date_pid_1.pt")
     total_date_pid = np.concatenate([date_pid1], axis=0)
     total_date_pid_test = total_date_pid
     grading_factor = pd.DataFrame(index=np.unique(total_date_pid_test[:, 0]), columns=np.unique(total_date_pid_test[:, 1]))
     test_output_list = test_output.tolist()
     for i in range(len(total_date_pid_test)):
         grading_factor.loc[total_date_pid_test[i][0], total_date_pid_test[i][1]] = test_output_list[i]
-    grading_factor.to_pickle("/home/datamake117/Documents/haris/DL/" + main_folder_name + "/单次_KFold_2023.pkl")
+    grading_factor.to_pickle("/home/datamake117/data/haris/DL/" + main_folder_name + "/单次_KFold_2023.pkl")
 
     gc.collect()
 
     # 第2-8轮
+    print('Round 2-8.')
     total_date_list = np.array(factor['date'].drop_duplicates().tolist())
     rolling_step = 3    # 3个月滚动训练
     window_size = 24    # 训练集大小
@@ -218,13 +221,13 @@ if __name__ == "__main__":
 
     test_output_list = []
     for round_num in range(2, 9):
-        test_output = torch.load("/home/datamake117/Documents/haris/DL/" + main_folder_name + "/test_output_" + str(round_num) + ".pt")
+        test_output = torch.load("/home/datamake117/data/haris/DL/" + main_folder_name + "/test_output_" + str(round_num) + ".pt")
         test_output_list.append(test_output)
     test_output = torch.cat(test_output_list)
     test_output = test_output.cpu()
     date_pid_list = []
     for round_num in range(2, 9):
-        date_pid = torch.load("/home/datamake117/Documents/haris/DL/" + main_folder_name + "/test_date_pid_" + str(round_num) + ".pt")
+        date_pid = torch.load("/home/datamake117/data/haris/DL/" + main_folder_name + "/test_date_pid_" + str(round_num) + ".pt")
         date_pid_list.append(date_pid)
     total_date_pid = np.concatenate(date_pid_list, axis=0)
     total_date_pid_test = total_date_pid
@@ -232,7 +235,7 @@ if __name__ == "__main__":
     test_output_list = test_output.tolist()
     for i in range(len(total_date_pid_test)):
         grading_factor.loc[total_date_pid_test[i][0], total_date_pid_test[i][1]] = test_output_list[i]
-    grading_factor2023 = pd.read_pickle("/home/datamake117/Documents/haris/DL/" + main_folder_name + "/单次_KFold_2023.pkl")
+    grading_factor2023 = pd.read_pickle("/home/datamake117/data/haris/DL/" + main_folder_name + "/单次_KFold_2023.pkl")
     grading_factor2023 = grading_factor2023[grading_factor2023.index < pd.to_datetime('2023-04-01')]
     grading_factor = pd.concat([grading_factor2023, grading_factor], axis=0)
-    grading_factor.to_pickle("/home/datamake117/Documents/haris/DL/" + main_folder_name + "/单次_KFold_0.pkl")
+    grading_factor.to_pickle("/home/datamake117/data/haris/DL/" + main_folder_name + "/单次_KFold_0.pkl")
