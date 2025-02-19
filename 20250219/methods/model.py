@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from sklearn.metrics import mutual_info_score
 
 
 # SAM（Sharpness-Aware Minimization）优化器
@@ -331,6 +332,7 @@ def backward_and_step(n, optimizer, batch_x, batch_group, batch_y, model, early_
     para n: 当前训练的步数或迭代索引。
     para optimizer: 用于优化模型参数的优化器（例如 Adam）。
     para batch_x: 当前批次的输入数据。
+    TODO: 增加使用para batch_group数据。
     para batch_y: 当前批次的目标标签。
     para model: 训练的模型（例如神经网络）。
     para early_stop: 早期停止的标志，用于在训练达到一定标准后提前停止训练。
@@ -385,6 +387,55 @@ class BalancedKMeans:
                     valid_centers = np.where(mask)[0]
                     next_best = valid_centers[np.argmin(dists[i, mask])]
                     clusters[i] = next_best
+            new_centers = np.array([X[clusters == k].mean(axis=0) for k in range(self.n_clusters)])
+            if np.allclose(centers, new_centers):
+                break
+            centers = new_centers
+        return clusters
+
+# 基于互信息的辅助因子平衡K均值聚类
+class BalancedKMeansMI:
+    def __init__(self, n_clusters, random_state=42, max_iter=200):
+        self.n_clusters = n_clusters
+        self.random_state = random_state
+        self.max_iter = max_iter
+
+    def _compute_mutual_information(self, X):
+        """ 计算特征矩阵中所有特征对之间的互信息 """
+        n_features = X.shape[1]
+        mi_matrix = np.zeros((n_features, n_features))
+        for i in range(n_features):
+            for j in range(i+1, n_features):
+                mi_matrix[i, j] = mutual_info_score(X[:, i], X[:, j])
+                mi_matrix[j, i] = mi_matrix[i, j]  # 互信息矩阵是对称的
+        return mi_matrix
+
+    def fit_predict(self, X):
+        X = np.array(X)
+        n_samples = X.shape[0]
+        max_size = (n_samples + self.n_clusters - 1) // self.n_clusters
+        np.random.seed(self.random_state)
+        # 计算互信息矩阵
+        mi_matrix = self._compute_mutual_information(X)
+        # 初始中心选择
+        centers = X[np.random.choice(n_samples, self.n_clusters, replace=False)]
+        for _ in range(self.max_iter):
+            # 计算每个样本与中心之间的"距离"，这里基于互信息矩阵
+            dists = np.zeros((n_samples, self.n_clusters))
+            for i in range(n_samples):
+                for j in range(self.n_clusters):
+                    dists[i, j] = np.sum(np.abs(mi_matrix[i] - mi_matrix[centers[j]]))
+            clusters = -np.ones(n_samples, dtype=int)
+            for i in np.argsort(np.min(dists, axis=1)):
+                closest = np.argmin(dists[i])
+                if np.sum(clusters == closest) < max_size:
+                    clusters[i] = closest
+                else:
+                    mask = np.arange(self.n_clusters) != closest
+                    valid_centers = np.where(mask)[0]
+                    next_best = valid_centers[np.argmin(dists[i, mask])]
+                    clusters[i] = next_best
+            # 更新中心
             new_centers = np.array([X[clusters == k].mean(axis=0) for k in range(self.n_clusters)])
             if np.allclose(centers, new_centers):
                 break
