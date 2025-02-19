@@ -6,10 +6,10 @@ import torch
 import torch.utils.data as Data
 from sklearn.cluster import KMeans
 
-from utils.model import *
-from utils.logger import *
-from utils.processing import *
-from utils.hyper import *
+from methods.model import *
+from methods.logger import *
+from methods.processing import *
+from methods.hyper import *
 
 
 wpcc = PartialCosLoss()
@@ -25,33 +25,37 @@ def train_one_Fold(
     '''
     用于训练深度学习模型的一折交叉验证函数，支持多模型并行训练，并包含特征选择、早停、日志记录及资源管理等功能
     ** 数据相关：
-    total_ts_train_val1, total_label_train_val, total_group_train_val: 训练+验证集的数据、标签和分组。
-    total_ts_test1, total_label_test, total_group_test: 测试集的数据、标签和分组。
-    date_list_train: 训练集的日期列表。
-    correlation_df: 因子与标签的相关性数据，用于特征筛选。
+    para total_ts_train_val1: 训练+验证集的因子数据
+    para total_label_train_val: 训练+验证集的标签数据
+    para total_group_train_val: 训练+验证集的流动性数据
+    para total_ts_test1: 测试集的因子数据
+    para total_label_test: 测试集的标签数据
+    para total_group_test: 测试集的流动性数据
+    para date_list_train: 训练集的日期列表
+    para correlation_df: 因子与标签的相关性数据，用于特征筛选
     TODO: 未使用的参数：total_group_train_val和total_group_test。
     ** 训练配置：
-    round_num, train_num: 当前交叉验证的轮次和训练编号。
-    Seed_list: 随机种子列表，用于模型初始化。
-    corr_thres: 相关性阈值，用于过滤高相关因子。
-    model_mode: 是否加载已有模型（用于继续训练）。
-    multi_model: 并行训练的模型数量。
+    para round_num: 当前交叉验证的轮数（周期序号）
+    para train_num: K折交叉验证的的第几折
+    para Seed_list: 随机种子列表，用于模型初始化
+    para corr_thres: 相关性阈值，用于过滤高相关因子
+    para model_mode: 是否加载已有模型（用于继续训练）
+    para multi_model: 模型数量
     ** 其他：
-    dt1-dt5: 不同数据集的日期范围，用于日志记录。
+    para dt1: 训练集开始时间
+    para dt2: 验证集开始时间
+    para dt3: 验证集结束时间
+    para dt4: 测试集开始时间
+    para dt5: 测试集结束时间
+    dt1 ------训练集------ dt2 ------验证集------ dt3/dt4 ------测试集------ dt5
     '''
     
     # 设置路径
     path_name = 'best_network_ic_' + str(round_num) + str(train_num)
     test_name = 'test_output_ic' + str(round_num) + str(train_num) + '.pt'
     logger_path = save_path + '/logger.log'
-
-    # 设置训练参数
-    learning_rate = 1e-3
-    num_epochs = 200
-    BATCH_SIZE= 2
-    BATCH_SIZE_VAL = 1
     
-    # 设置训练集、验证集和测试集 
+    # 划分训练集、验证集和测试集
     train_index, val_index = index_tuple
     total_ts_train1 = total_ts_train_val1[train_index, :, :]
     total_ts_val1 = total_ts_train_val1[val_index[1:], :, :]  # [1:] 是为了跳过第一日
@@ -78,17 +82,17 @@ def train_one_Fold(
     torch_dataset_test = Data.TensorDataset(x_test1, group_test, y_test)
     loader_test = Data.DataLoader(dataset=torch_dataset_test, batch_size=5, shuffle=False, num_workers=0, pin_memory=True)
     
-    # correlation_df这个就是用每天的因子和当天要预测的标签计算出的包括平方和立方最大IC的dataframe
-    # 用correlation_df聚类决定因子分组
-    data_scaled = correlation_df.loc[date_list_train].iloc[train_index, 1250:]
+    # correlation_df这个就是用每天的因子和当天要预测的标签计算出的包括IC、IC平方和IC立方最大值的dataframe
+    # 用correlation_df聚类决定辅助因子分组
+    data_scaled = correlation_df.loc[date_list_train].iloc[train_index, 680:]
     data_scaled = data_scaled.fillna(0)
     kmeans = KMeans(n_clusters=3, random_state=42)
     clusters = kmeans.fit_predict(data_scaled.T)
-    # 将前1250个特征与每个聚类结果组合，生成3组特征索引（factor_list），用于后续多模型训练
+    # 将feature0中的680个主要因子与feature1中辅助因子的每个聚类结果组合，生成3组特征索引（factor_list），用于后续多模型训练
     factor_list = []
-    factor_list.append(torch.from_numpy(np.array(list(range(0, 1250)) + [list(range(1250, 2790))[i] for i in np.where(clusters==0)[0]])))
-    factor_list.append(torch.from_numpy(np.array(list(range(0, 1250)) + [list(range(1250, 2790))[i] for i in np.where(clusters==1)[0]])))
-    factor_list.append(torch.from_numpy(np.array(list(range(0, 1250)) + [list(range(1250, 2790))[i] for i in np.where(clusters==2)[0]])))
+    factor_list.append(torch.from_numpy(np.array(list(range(0, 680)) + [list(range(680, 2221))[i] for i in np.where(clusters==0)[0]])))
+    factor_list.append(torch.from_numpy(np.array(list(range(0, 680)) + [list(range(680, 2221))[i] for i in np.where(clusters==1)[0]])))
+    factor_list.append(torch.from_numpy(np.array(list(range(0, 680)) + [list(range(680, 2221))[i] for i in np.where(clusters==2)[0]])))
 
     # 根据相关性阈值筛选掉高相关性的因子（保留的逻辑目前是按顺序保留第一个）
     mask = generate_mask(x_train1.reshape(-1, x_train1.size(2)), corr_thres=corr_thres).cpu()
@@ -108,14 +112,14 @@ def train_one_Fold(
             model_path = os.path.join(save_path, path_name_model)
             model_list[n].load_state_dict(torch.load(model_path))
     
-    # 训练时每个模型是异步训练的分别创建独立的优化器
+    # 训练时每个模型是异步训练的，分别创建独立的优化器
     optimizer_list = []
     for n in range(multi_model):
         base_optimizer = torch.optim.Adam
         optimizer_list.append(SAM(model_list[n].parameters(), base_optimizer, lr=learning_rate))
 
     logger = get_logger(logger_path)
-    logger.info(f"Term{round_num}, Train{train_num}, Train Period:{dt1}-{dt2}, Val Period:{dt2}-{dt3}, Test Period:{dt4}-{dt5}")
+    logger.info(f"Period{round_num}, Train{train_num}, Train Period:{dt1}-{dt2}, Val Period:{dt2}-{dt3}, Test Period:{dt4}-{dt5}")
     logger.info(f"Train1 Shape: {x_train1.shape}, Val1 Shape: {x_val1.shape}, Test1 Shape: {x_test1.shape}")
     logger.info("Start Training")
     early_stopping = EarlyStopping(save_path, logger, experts_num=multi_model)
@@ -216,7 +220,7 @@ def train_one_Fold(
             nan_index = torch.isnan(batch_y[:, 0])
             test_outputs = [model_list[n](batch_x1) for n in range(multi_model)]
             test_outputs = torch.stack([test_outputs[j].to(torch.device("cuda:0")) for j in topk_last_week]).mean(dim=0)
-            _, topk_last_week = torch.topk(torch.tensor(loss_list_model), 6, largest=True)
+            _, topk_last_week = torch.topk(torch.tensor(loss_list_model), 6, largest=True)  # 修改数值6，可只保留最好的k个模型
 
             out_mean = test_outputs.mean(axis=0)
             out_std = test_outputs.std(axis=0)
