@@ -158,41 +158,20 @@ class base_model(nn.Module):
         factor_mask[factor_list] = True
         final_mask = ic_mask & factor_mask  # final_mask是ic_mask和factor_mask的交集
         self.selected_factor = torch.nonzero(final_mask).squeeze()  # 获取final_mask的索引
-        # 主要特征和次要特征的分离
-        self.main_features = factor_list[:680]  # 主要特征是factor_list中的前680个
-        self.secondary_features = factor_list[680:]  # 次要特征是factor_list中的680以后的部分
-        # 主要特征处理
-        self.input_bn_main = nn.BatchNorm1d(self.main_features.shape[0])
-        self.input_linear_main = nn.Linear(self.main_features.shape[0], 512)
-        self.res_blocks_main = nn.Sequential(
+        self.input_bn = nn.BatchNorm1d(self.selected_factor.shape[0])
+        self.input_linear = nn.Linear(self.selected_factor.shape[0], 512)
+        self.res_blocks = nn.Sequential(
             ResBlock(512, 512),
             ResBlock(512, 256),
             ResBlock(256, 128),
             ResBlock(128, 64)
         )
-        # 主要特征的输出
-        self.output_main = nn.Sequential(
+        self.output = nn.Sequential(
             nn.Dropout(drop_out),
-            nn.Linear(64, 16)
+            nn.Linear(64, output_size)
         )
-        # 主要特征和次要特征结合的处理
-        self.input_bn_combined = nn.BatchNorm1d(self.selected_factor.shape[0])
-        self.input_linear_combined = nn.Linear(self.selected_factor.shape[0], 512)
-        self.res_blocks_combined = nn.Sequential(
-            ResBlock(512, 512),
-            ResBlock(512, 256),
-            ResBlock(256, 128),
-            ResBlock(128, 64)
-        )
-        # 合并后的输出
-        self.output_combined = nn.Sequential(
-            nn.Dropout(drop_out),
-            nn.Linear(64, 16)
-        )
-        # 新增的一层神经网络，用来合并output_main和output_combined
-        self.merge_layer = nn.Linear(32, output_size)  # 输入是两个输出，合并后得到最终输出
         self._initialize_weights(seed)
-
+    
     def seed_everything(self, seed):
         random.seed(seed)                           # 设置随机种子
         np.random.seed(seed)                        # 设置NumPy的随机种子
@@ -214,23 +193,13 @@ class base_model(nn.Module):
                 nn.init.constant_(m.bias, 0)        # 批量归一化的偏置初始化为0
 
     def forward(self, x):
-        x = x.to(self.selected_factor.device)       # 将输入移动到正确的设备
-        x_main = x[:, self.main_features]           # 提取主要特征（factor_list中的前680个）
-        x_combined = x[:, self.selected_factor]
-        # 主要特征的处理
-        x_main = self.input_bn_main(x_main)
-        x_main = F.relu(self.input_linear_main(x_main))
-        x_main = self.res_blocks_main(x_main)
-        output_main = self.output_main(x_main).squeeze(-1)
-        # 主要特征和次要特征的结合处理
-        x_combined = self.input_bn_combined(x_combined)
-        x_combined = F.relu(self.input_linear_combined(x_combined))
-        x_combined = self.res_blocks_combined(x_combined)
-        output_combined = self.output_combined(x_combined).squeeze(-1)
-        # 使用merge_layer合并两个输出
-        output = torch.cat((output_main.unsqueeze(-1), output_combined.unsqueeze(-1)), dim=-1)
-        final_output = self.merge_layer(output)
-        return final_output
+        x = x.to(self.selected_factor.device)
+        x = x[:, self.selected_factor]
+        x = self.input_bn(x)
+        x = F.relu(self.input_linear(x))
+        x = self.res_blocks(x)
+        x = self.output(x).squeeze(-1)
+        return x
 
 
 # 负责早停的类
@@ -394,10 +363,11 @@ def backward_and_step(n, optimizer, batch_x, batch_group, batch_y, model, early_
 
 # 辅助因子平衡K均值聚类
 class BalancedKMeans:
-    def __init__(self, n_clusters, random_state=42, max_iter=200):
+    def __init__(self, n_clusters, random_state=42, max_iter=200, balance=False):
         self.n_clusters = n_clusters
         self.random_state = random_state
         self.max_iter = max_iter
+        self.balance = balance
         
     def fit_predict(self, X):
         X = np.array(X)
@@ -406,7 +376,10 @@ class BalancedKMeans:
         np.random.seed(self.random_state)
         centers = X[np.random.choice(n_samples, self.n_clusters, replace=False)]
         for _ in range(self.max_iter):
-            dists = np.linalg.norm(X[:, None] - centers, axis=2)
+            if self.balance:
+                dists = -np.linalg.norm(X[:, None] - centers, axis=2)
+            else:
+                dists = np.linalg.norm(X[:, None] - centers, axis=2)
             clusters = -np.ones(n_samples, dtype=int)
             for i in np.argsort(np.min(dists, axis=1)):
                 closest = np.argmin(dists[i])
