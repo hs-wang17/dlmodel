@@ -156,11 +156,11 @@ class base_model(nn.Module):
         ic_mask = mask.to(dtype=torch.bool)
         factor_mask = torch.zeros(ic_mask.shape, dtype=torch.bool).to(ic_mask.device)
         factor_mask[factor_list] = True
-        final_mask = ic_mask & factor_mask  # final_mask是ic_mask和factor_mask的交集
+        final_mask = ic_mask & factor_mask                          # final_mask是ic_mask和factor_mask的交集
         self.selected_factor = torch.nonzero(final_mask).squeeze()  # 获取final_mask的索引
         # 主要特征和次要特征的分离
-        self.main_features = factor_list[:680]  # 主要特征是factor_list中的前680个
-        self.secondary_features = factor_list[680:]  # 次要特征是factor_list中的680以后的部分
+        self.main_features = factor_list[:1251]                      # 主要特征是factor_list中的前1250个
+        self.secondary_features = factor_list[1251:]                 # 次要特征是factor_list中的1250以后的部分
         # 主要特征处理
         self.input_bn_main = nn.BatchNorm1d(self.main_features.shape[0])
         self.input_linear_main = nn.Linear(self.main_features.shape[0], 512)
@@ -190,32 +190,32 @@ class base_model(nn.Module):
             nn.Linear(64, 16)
         )
         # 新增的一层神经网络，用来合并output_main和output_combined
-        self.merge_layer = nn.Linear(32, output_size)  # 输入是两个输出，合并后得到最终输出
+        self.merge_layer = nn.Linear(32, output_size)   # 输入是两个输出，合并后得到最终输出
         self._initialize_weights(seed)
 
     def seed_everything(self, seed):
-        random.seed(seed)                           # 设置随机种子
-        np.random.seed(seed)                        # 设置NumPy的随机种子
-        torch.manual_seed(seed)                     # 设置PyTorch的随机种子
-        torch.cuda.manual_seed(seed)                # 设置CUDA的随机种子
-        torch.cuda.manual_seed_all(seed)            # 设置所有CUDA设备的随机种子
-        torch.backends.cudnn.deterministic = True   # 确保CUDA的行为是确定的
-        torch.backends.cudnn.benchmark = False      # 禁用CUDA的自动优化
+        random.seed(seed)                               # 设置随机种子
+        np.random.seed(seed)                            # 设置NumPy的随机种子
+        torch.manual_seed(seed)                         # 设置PyTorch的随机种子
+        torch.cuda.manual_seed(seed)                    # 设置CUDA的随机种子
+        torch.cuda.manual_seed_all(seed)                # 设置所有CUDA设备的随机种子
+        torch.backends.cudnn.deterministic = True       # 确保CUDA的行为是确定的
+        torch.backends.cudnn.benchmark = False          # 禁用CUDA的自动优化
 
     def _initialize_weights(self, seed):
-        self.seed_everything(seed)                  # 用固定种子初始化
+        self.seed_everything(seed)                      # 用固定种子初始化
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight)   # 对全连接层进行Kaiming Normal初始化
+                nn.init.kaiming_normal_(m.weight)       # 对全连接层进行Kaiming Normal初始化
                 if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)    # 初始化偏置为0
+                    nn.init.constant_(m.bias, 0)        # 初始化偏置为0
             elif isinstance(m, nn.BatchNorm1d):
-                nn.init.constant_(m.weight, 1)      # 批量归一化的权重初始化为1
-                nn.init.constant_(m.bias, 0)        # 批量归一化的偏置初始化为0
+                nn.init.constant_(m.weight, 1)          # 批量归一化的权重初始化为1
+                nn.init.constant_(m.bias, 0)            # 批量归一化的偏置初始化为0
 
     def forward(self, x):
-        x = x.to(self.selected_factor.device)       # 将输入移动到正确的设备
-        x_main = x[:, self.main_features]           # 提取主要特征（factor_list中的前680个）
+        x = x.to(self.selected_factor.device)           # 将输入移动到正确的设备
+        x_main = x[:, self.main_features]               # 提取主要特征（factor_list中的前1250个）
         x_combined = x[:, self.selected_factor]
         # 主要特征的处理
         x_main = self.input_bn_main(x_main)
@@ -228,8 +228,8 @@ class base_model(nn.Module):
         x_combined = self.res_blocks_combined(x_combined)
         output_combined = self.output_combined(x_combined).squeeze(-1)
         # 使用merge_layer合并两个输出
-        output = torch.cat((output_main.unsqueeze(-1), output_combined.unsqueeze(-1)), dim=-1)
-        final_output = self.merge_layer(output)
+        output = torch.cat((output_main, output_combined), dim=1)
+        final_output = self.merge_layer(output).squeeze(-1)
         return final_output
 
 
