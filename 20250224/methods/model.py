@@ -159,8 +159,8 @@ class base_model(nn.Module):
         final_mask = ic_mask & factor_mask                          # final_mask是ic_mask和factor_mask的交集
         self.selected_factor = torch.nonzero(final_mask).squeeze()  # 获取final_mask的索引
         # 主要特征和次要特征的分离
-        self.main_features = factor_list[:1251]                      # 主要特征是factor_list中的前1250个
-        self.secondary_features = factor_list[1251:]                 # 次要特征是factor_list中的1250以后的部分
+        self.main_features = factor_list[:1250]                      # 主要特征是factor_list中的前1250个
+        self.secondary_features = factor_list[1250:]                 # 次要特征是factor_list中的1250以后的部分
         # 主要特征处理
         self.input_bn_main = nn.BatchNorm1d(self.main_features.shape[0])
         self.input_linear_main = nn.Linear(self.main_features.shape[0], 512)

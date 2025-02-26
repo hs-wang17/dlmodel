@@ -84,15 +84,15 @@ def train_one_Fold(
     
     # correlation_df这个就是用每天的因子和当天要预测的标签计算出的包括IC、IC平方和IC立方最大值的dataframe
     # 用correlation_df聚类决定辅助因子分组
-    data_scaled = correlation_df.loc[date_list_train].iloc[train_index, 1251:]
+    data_scaled = correlation_df.loc[date_list_train].iloc[train_index, 1250:]
     data_scaled = data_scaled.fillna(0)
     kmeans = BalancedKMeansMetric(n_clusters=3, random_state=42, metric='cosine')
     clusters = kmeans.fit_predict(data_scaled.T)
     # 将feature0中的1250个主要因子与feature1中辅助因子的每个聚类结果组合，生成3组特征索引（factor_list），用于后续多模型训练
     factor_list = []
-    factor_list.append(torch.from_numpy(np.array(list(range(0, 1251)) + [list(range(1251, 2791))[i] for i in np.where(clusters==0)[0]])))
-    factor_list.append(torch.from_numpy(np.array(list(range(0, 1251)) + [list(range(1251, 2791))[i] for i in np.where(clusters==1)[0]])))
-    factor_list.append(torch.from_numpy(np.array(list(range(0, 1251)) + [list(range(1251, 2791))[i] for i in np.where(clusters==2)[0]])))
+    factor_list.append(torch.from_numpy(np.array(list(range(0, 1250)) + [list(range(1250, 2790))[i] for i in np.where(clusters==0)[0]])))
+    factor_list.append(torch.from_numpy(np.array(list(range(0, 1250)) + [list(range(1250, 2790))[i] for i in np.where(clusters==1)[0]])))
+    factor_list.append(torch.from_numpy(np.array(list(range(0, 1250)) + [list(range(1250, 2790))[i] for i in np.where(clusters==2)[0]])))
 
     # 根据相关性阈值筛选掉高相关性的因子（保留的逻辑目前是按顺序保留第一个）
     mask = generate_mask(x_train1.reshape(-1, x_train1.size(2)), corr_thres=corr_thres).cpu()
