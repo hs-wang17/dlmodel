@@ -86,7 +86,7 @@ def train_one_Fold(
     # 用correlation_df聚类决定辅助因子分组
     data_scaled = correlation_df.loc[date_list_train].iloc[train_index, 1250:]
     data_scaled = data_scaled.fillna(0)
-    kmeans = BalancedKMeans(n_clusters=3, random_state=42, balance=True)
+    kmeans = KMeans(n_clusters=3, random_state=42)
     clusters = kmeans.fit_predict(data_scaled.T)
     # 将feature0中的1250个主要因子与feature1中辅助因子的每个聚类结果组合，生成3组特征索引（factor_list），用于后续多模型训练
     factor_list = []
