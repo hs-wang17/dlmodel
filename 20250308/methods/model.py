@@ -333,7 +333,7 @@ class PartialCosLoss(nn.Module):
     def forward(self, output, target):
         amount = target[:, 4].float().to(output.device)
         target = target[:, 0].float().to(output.device)
-        return self.wpcc_org(output, target, output)  # amount
+        return self.wpcc_org(output, target, amount)  # amount
 
 # 既可以调整成损失又可以当验证集等指标的模拟交易收益，这个目前是在测试集每周选一次模型中用到
 def simu_trade(output, target):

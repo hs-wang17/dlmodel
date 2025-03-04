@@ -337,12 +337,13 @@ class PartialCosLoss(nn.Module):
 
 # 既可以调整成损失又可以当验证集等指标的模拟交易收益，这个目前是在测试集每周选一次模型中用到
 def simu_trade(output, target):
-    capital = 5e8                                                           # 总资金
+    capital = 5e8  # 总资金
     target = target.to(output.device)
-    buyable_amount = target[:, 4].unsqueeze(-1).float().to(output.device)   # 每只股票最大可买入的资金数额
-    true_yields = target[:, 0].unsqueeze(-1).float().to(output.device)      # 每只股票的真实收益率
-    predicted_yields = output.unsqueeze(-1).float()                         # 模型预测的收益率
-    valid_mask = ~torch.isnan(buyable_amount) & ~torch.isnan(true_yields)   # 过滤掉缺失值对应的数据
+    buyable_amount = target[:, 4].unsqueeze(-1).float().to(output.device)  # 每只股票最大可买入的资金数额
+    true_yields = target[:, 0].unsqueeze(-1).float().to(output.device)  # 每只股票的真实收益率
+    predicted_yields = output.unsqueeze(-1).float()  # 模型预测的收益率
+    # 过滤掉缺失值对应的数据
+    valid_mask = ~torch.isnan(buyable_amount) & ~torch.isnan(true_yields)
     buyable_amount = buyable_amount[valid_mask]
     true_yields = true_yields[valid_mask]
     predicted_yields = predicted_yields[valid_mask]
@@ -350,7 +351,7 @@ def simu_trade(output, target):
     value_500 = top500_values[-1]
     buy_amount = buyable_amount[predicted_yields >= value_500]
     true_yields = true_yields[predicted_yields >= value_500]
-    total_profit = torch.sum(buy_amount * true_yields) / capital            # 计算总收益率：股票收益总和 / 总资金
+    total_profit = torch.sum(buy_amount * true_yields) / capital  # 计算总收益率：股票收益总和 / 总资金
     return total_profit
 
 # 训练函数

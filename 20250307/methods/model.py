@@ -340,9 +340,9 @@ def simu_trade(output, target):
     capital = 5e8                                                           # 总资金
     target = target.to(output.device)
     buyable_amount = target[:, 4].unsqueeze(-1).float().to(output.device)   # 每只股票最大可买入的资金数额
-    true_yields = target[:, 0].unsqueeze(-1).float().to(output.device)      # 每只股票的真实收益率
-    predicted_yields = output.unsqueeze(-1).float()                         # 模型预测的收益率
-    valid_mask = ~torch.isnan(buyable_amount) & ~torch.isnan(true_yields)   # 过滤掉缺失值对应的数据
+    true_yields = target[:, 0].unsqueeze(-1).float().to(output.device)      # 真实收益率
+    predicted_yields = output.unsqueeze(-1).float()                         # 预测收益率
+    valid_mask = ~torch.isnan(buyable_amount) & ~torch.isnan(true_yields)   # 过滤掉缺失值
     buyable_amount = buyable_amount[valid_mask]
     true_yields = true_yields[valid_mask]
     predicted_yields = predicted_yields[valid_mask]
@@ -353,8 +353,80 @@ def simu_trade(output, target):
     total_profit = torch.sum(buy_amount * true_yields) / capital            # 计算总收益率：股票收益总和 / 总资金
     return total_profit
 
+def simu_trade_loss(output, target, temperature=1e-8):
+    capital = 5e8                                                           # 总资金
+    target = target.to(output.device)
+    buyable_amount = target[:, 4].unsqueeze(-1).float().to(output.device)   # 每只股票最大可买入的资金数额
+    true_yields = target[:, 0].unsqueeze(-1).float().to(output.device)      # 真实收益率
+    predicted_yields = output.unsqueeze(-1).float()                         # 预测收益率
+    valid_mask = ~torch.isnan(buyable_amount) & ~torch.isnan(true_yields)   # 过滤掉缺失值
+    buyable_amount = buyable_amount[valid_mask]
+    true_yields = true_yields[valid_mask]
+    predicted_yields = predicted_yields[valid_mask]
+    top500_values, _ = torch.topk(predicted_yields, 500, largest=True, sorted=True)
+    value_500 = top500_values[-1]
+    diff = (predicted_yields - value_500) / temperature
+    weights = torch.sigmoid(diff)
+    weighted_profit = torch.sum(buyable_amount * true_yields * weights)
+    total_profit = weighted_profit / capital
+    loss = -total_profit
+    return loss
+
+class SimuTradeLoss(nn.Module):
+    def __init__(self, temperature=1e-8):
+        """
+        自定义交易模拟损失函数（SimuTradeLoss）
+        
+        参数:
+        - temperature: 控制 sigmoid 选择的温度参数，数值越小，选择越接近 hard selection。
+        """
+        super(SimuTradeLoss, self).__init__()
+        self.temperature = temperature
+        self.capital = 5e8  # 总资金
+
+    def forward(self, output, target):
+        """
+        计算模拟交易损失
+        
+        参数:
+        - output: 模型预测的收益率 (Tensor, shape: [batch_size])
+        - target: 真实数据 (Tensor, shape: [batch_size, n_features])
+        
+        返回:
+        - loss: 负收益，作为损失进行最小化
+        """
+        target = target.to(output.device)
+        
+        # 提取数据
+        buyable_amount = target[:, 4].unsqueeze(-1).float().to(output.device)  # 每只股票最大可买入金额
+        true_yields = target[:, 0].unsqueeze(-1).float().to(output.device)     # 真实收益率
+        predicted_yields = output.unsqueeze(-1).float()                        # 模型预测收益率
+        
+        # 过滤掉 NaN 值
+        valid_mask = ~torch.isnan(buyable_amount) & ~torch.isnan(true_yields)
+        buyable_amount = buyable_amount[valid_mask]
+        true_yields = true_yields[valid_mask]
+        predicted_yields = predicted_yields[valid_mask]
+        
+        # 选取 top 500 预测收益率
+        top500_values, _ = torch.topk(predicted_yields, 500, largest=True, sorted=True)
+        value_500 = top500_values[-1]  # 第 500 大的预测收益
+        
+        # 计算 soft 选择权重
+        diff = (predicted_yields - value_500) / self.temperature
+        weights = torch.sigmoid(diff)  # 使用 sigmoid 使其平滑可导
+        
+        # 计算加权总收益
+        weighted_profit = torch.sum(buyable_amount * true_yields * weights)
+        total_profit = weighted_profit / self.capital
+        
+        # 取负作为损失
+        loss = -total_profit
+        
+        return loss
+
 # 训练函数
-def backward_and_step(n, optimizer, batch_x, batch_group, batch_y, model, early_stop, val_loss_min, wpcc):
+def backward_and_step(n, optimizer, batch_x, batch_group, batch_y, model, early_stop, val_loss_min, loss_func):
     '''
     训练一个step的函数，带L1正则化，这个正则化系数lambda是比较早调优的结果
     对于不同因子个数情况下以及可能被mask成0的因子比例可能需要用不同大小的lambda
@@ -371,7 +443,7 @@ def backward_and_step(n, optimizer, batch_x, batch_group, batch_y, model, early_
     if early_stop[n] == False:
         # SAM优化器：第一步
         outputs = model(batch_x)
-        loss = wpcc(outputs, batch_y)
+        loss = loss_func(outputs, batch_y)
         return_loss = loss.clone()
         loss = loss + lambda_ * sum(torch.abs(param).sum() for param in model.parameters()) / sum(p.numel() for p in model.parameters())
         loss_grad = torch.autograd.grad(loss, model.parameters(), retain_graph=True)
@@ -380,7 +452,7 @@ def backward_and_step(n, optimizer, batch_x, batch_group, batch_y, model, early_
         optimizer.first_step(zero_grad=True)
         # SAM优化器：第二步
         outputs_second = model(batch_x)
-        loss_second = wpcc(outputs_second, batch_y)
+        loss_second = loss_func(outputs_second, batch_y)
         return_loss = loss_second.clone()
         loss_second = loss_second + lambda_ * sum(torch.abs(param).sum() for param in model.parameters()) / sum(p.numel() for p in model.parameters())
         loss_grad_second = torch.autograd.grad(loss_second, model.parameters(), retain_graph=True)

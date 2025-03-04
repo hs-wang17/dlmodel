@@ -12,7 +12,7 @@ from methods.processing import *
 from methods.hyper import *
 
 
-wpcc = PartialCosLoss()
+wpcc = SimuTradeLoss()
 
 # K折交叉验证训练中的一折
 def train_one_Fold(
@@ -83,21 +83,16 @@ def train_one_Fold(
     loader_test = Data.DataLoader(dataset=torch_dataset_test, batch_size=5, shuffle=False, num_workers=0, pin_memory=True)
     
     # correlation_df这个就是用每天的因子和当天要预测的标签计算出的包括IC、IC平方和IC立方最大值的dataframe
-    # 用correlation_df聚类决定辅助因子分组    
-    data_scaled_main = correlation_df.loc[date_list_train].iloc[train_index, :1250]
-    data_scaled_main = data_scaled_main.sum(axis=0)
-    top_500_indices = np.argpartition(data_scaled_main, -500)[-500:]
-    top_500_indices = np.sort(top_500_indices[np.argsort(data_scaled_main[top_500_indices])[::-1]])
-    remaining_indices = np.concatenate([np.setdiff1d(data_scaled_main.index.astype(int), top_500_indices), np.arange(1250, 2790)])
-    data_scaled = correlation_df.loc[date_list_train].iloc[train_index, remaining_indices]
+    # 用correlation_df聚类决定辅助因子分组
+    data_scaled = correlation_df.loc[date_list_train].iloc[train_index, 1250:]
     data_scaled = data_scaled.fillna(0)
     kmeans = KMeans(n_clusters=3, random_state=42)
     clusters = kmeans.fit_predict(data_scaled.T)
     # 将feature0中的1250个主要因子与feature1中辅助因子的每个聚类结果组合，生成3组特征索引（factor_list），用于后续多模型训练
     factor_list = []
-    factor_list.append(torch.from_numpy(np.array(list(top_500_indices) + [remaining_indices[i] for i in np.where(clusters==0)[0]])))
-    factor_list.append(torch.from_numpy(np.array(list(top_500_indices) + [remaining_indices[i] for i in np.where(clusters==1)[0]])))
-    factor_list.append(torch.from_numpy(np.array(list(top_500_indices) + [remaining_indices[i] for i in np.where(clusters==2)[0]])))
+    factor_list.append(torch.from_numpy(np.array(list(range(0, 1250)) + [list(range(1250, 2790))[i] for i in np.where(clusters==0)[0]])))
+    factor_list.append(torch.from_numpy(np.array(list(range(0, 1250)) + [list(range(1250, 2790))[i] for i in np.where(clusters==1)[0]])))
+    factor_list.append(torch.from_numpy(np.array(list(range(0, 1250)) + [list(range(1250, 2790))[i] for i in np.where(clusters==2)[0]])))
 
     # 根据相关性阈值筛选掉高相关性的因子（保留的逻辑目前是按顺序保留第一个）
     mask = generate_mask(x_train1.reshape(-1, x_train1.size(2)), corr_thres=corr_thres).cpu()
@@ -147,10 +142,12 @@ def train_one_Fold(
             # 使用异步计算（torch.jit.fork）来并行训练多个模型
             futures_list = []
             for n in range(multi_model):
-                futures_list.append(torch.jit.fork(
-                    backward_and_step, n, optimizer_list[n], batch_x1, batch_group, batch_y,
-                    model_list[n], early_stopping.early_stop, early_stopping.val_loss_min, wpcc
-                    ))
+                futures_list.append(
+                    torch.jit.fork(
+                        backward_and_step, n, optimizer_list[n], batch_x1, batch_group, batch_y,
+                        model_list[n], early_stopping.early_stop, early_stopping.val_loss_min, wpcc
+                        )
+                    )
             losses = [torch.jit.wait(future) for future in futures_list]
             train_loss_list.append(torch.mean(torch.stack(losses)).item())
         train_loss = sum(train_loss_list) / len(train_loss_list)
