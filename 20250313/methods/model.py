@@ -355,10 +355,10 @@ def simu_trade(output, target):
 
 
 class SimuTradeLoss(nn.Module):
-    def __init__(self, temperature=1e-8):
+    def __init__(self, capital=1e5, temperature=1e-8):
         super(SimuTradeLoss, self).__init__()
+        self.capital = capital  # 总资金
         self.temperature = temperature
-        self.capital = 5e8  # 总资金
 
     def forward(self, output, target):
         target = target.to(output.device)
@@ -379,7 +379,7 @@ class SimuTradeLoss(nn.Module):
         return loss
     
 class SimuTradeCapitalLoss(nn.Module):
-    def __init__(self, capital=5e8, temperature=1e-8, num_iter=5, overused=False):
+    def __init__(self, capital=1e5, temperature=1e-3, num_iter=5, overused=False):
         super(SimuTradeCapitalLoss, self).__init__()
         self.capital = capital
         self.temperature = temperature
@@ -413,21 +413,21 @@ class SimuTradeCapitalLoss(nn.Module):
             return -weighted_profit / self.capital + 1e-4 * penalty
         
 class CombinedLoss(nn.Module):
-    def __init__(self, alpha=0.5):
+    def __init__(self):
         super(CombinedLoss, self).__init__()
-        self.alpha = alpha                                                      # 0.5 表示两个损失的权重相等，可以调整
         self.partial_cos_loss = PartialCosLoss()
         self.simu_trade_loss = SimuTradeLoss()
 
     def forward(self, output, target):
         loss1 = self.partial_cos_loss(output, target)
         loss2 = self.simu_trade_loss(output, target)
-        # mean1, std1 = loss1.mean(), loss1.std()
-        # mean2, std2 = loss2.mean(), loss2.std()
-        # loss1 = (loss1 - mean1) / (std1 + 1e-8)
-        # loss2 = (loss2 - mean2) / (std2 + 1e-8)
-        loss = self.alpha * loss1 + (1 - self.alpha) * F.sigmoid(loss2)
-        return loss
+        grad1 = torch.autograd.grad(loss1, output, retain_graph=True)[0]
+        grad2 = torch.autograd.grad(loss2, output, retain_graph=True)[0]
+        norm1 = torch.norm(grad1)
+        norm2 = torch.norm(grad2)
+        alpha = norm2 / (norm1 + norm2)
+        combined_loss = alpha * loss1 + (1 - alpha) * loss2
+        return combined_loss
 
 
 # 训练函数

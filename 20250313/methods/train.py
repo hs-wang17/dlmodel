@@ -12,7 +12,7 @@ from methods.processing import *
 from methods.hyper import *
 
 
-wpcc = SimuTradeLoss()
+wpcc = CombinedLoss()
 
 # K折交叉验证训练中的一折
 def train_one_Fold(

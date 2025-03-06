@@ -369,7 +369,7 @@ class SimuTradeLoss(nn.Module):
         buyable_amount = buyable_amount[valid_mask]
         true_yields = true_yields[valid_mask]
         predicted_yields = predicted_yields[valid_mask]
-        top500_values, _ = torch.topk(predicted_yields, 500, largest=True, sorted=True)
+        top500_values, _ = torch.topk(predicted_yields, 1000, largest=True, sorted=True)
         value_500 = top500_values[-1]                                           # 选取 top 500 预测收益率
         diff = (predicted_yields - value_500) / self.temperature                # 计算 soft 选择权重
         weights = torch.sigmoid(diff)                                           # 使用 sigmoid 使其平滑可导
@@ -379,7 +379,7 @@ class SimuTradeLoss(nn.Module):
         return loss
     
 class SimuTradeCapitalLoss(nn.Module):
-    def __init__(self, capital=5e8, temperature=1e-8, num_iter=5, overused=False):
+    def __init__(self, capital=1e5, temperature=1e-8, num_iter=5, overused=False):
         super(SimuTradeCapitalLoss, self).__init__()
         self.capital = capital
         self.temperature = temperature

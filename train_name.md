@@ -120,7 +120,7 @@
 
 20250310:
 
-1. 修改simu_trade_capital为可反向传播的损失函数，考虑资金量
+1. 修改simu_trade为可前1000个股票的损失函数
 
 ---
 
@@ -140,3 +140,8 @@
 
 ---
 
+20250313:
+
+1. 修改WPCC损失函数为成交量加权：self.wpcc_org(output, target, amount)
+
+2. 使用WPCC和simu_trade归一化损失梯度均衡进行训练
