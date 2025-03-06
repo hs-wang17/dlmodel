@@ -13,6 +13,8 @@ from methods.hyper import *
 
 
 wpcc = CombinedLoss()
+wpcc_ = SimuTradeLoss()
+
 
 # K折交叉验证训练中的一折
 def train_one_Fold(
@@ -168,7 +170,7 @@ def train_one_Fold(
                 val_outputs_list = [model_list[n](batch_x1) for n in range(multi_model)]
                 val_loss_list_model = []
                 for n in range(multi_model):
-                    val_loss_list_model.append(wpcc(val_outputs_list[n], batch_y))
+                    val_loss_list_model.append(wpcc_(val_outputs_list[n], batch_y))
                 val_loss_list.append(val_loss_list_model)
             val_loss = [torch.median(torch.tensor([val_loss_list[j][n] for j in range(step + 1)])).cpu() for n in range(multi_model)]
             
