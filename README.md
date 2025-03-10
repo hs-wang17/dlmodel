@@ -145,3 +145,30 @@
 1. 修改WPCC损失函数为成交量加权：self.wpcc_org(output, target, amount)
 
 2. 使用WPCC和simu_trade归一化损失梯度均衡进行训练
+
+---
+
+20250314:
+
+1. 修改WPCC损失函数为成交量加权：self.wpcc_org(output, target, amount)
+
+2. 修改主要因子和辅助因子的模型结构（主要因子单独使用ResNet+主要&辅助因子合并使用ResNet+对称交叉注意力机制）
+
+---
+
+20250315:
+
+1. 修改WPCC损失函数为成交量加权：self.wpcc_org(output, target, amount)
+
+2. 修改主要因子和辅助因子的模型结构（主要因子单独使用ResNet+主要&辅助因子合并使用ResNet+非对称交叉注意力机制+动态融合）
+
+---
+
+20250316:
+
+1. 修改WPCC损失函数为成交量加权：self.wpcc_org(output, target, amount)
+
+2. 修改主要因子和辅助因子的模型结构（主要因子+主要&辅助因子层级金字塔模型）
+
+---
+
