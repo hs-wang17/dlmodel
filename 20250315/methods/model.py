@@ -193,9 +193,9 @@ class base_model(nn.Module):
         final_mask = ic_mask & factor_mask                          # final_mask是ic_mask和factor_mask的交集
         self.selected_factor = torch.nonzero(final_mask).squeeze()  # 获取final_mask的索引
         self.main_features = factor_list[:1250]                     # 主要特征是factor_list中的前1250个
-        self._configure_dual_path()                                 # 双路径架构配置
         self.output_size = output_size
         self.drop_out = drop_out
+        self._configure_dual_path()                                 # 双路径架构配置
         self._initialize_weights(seed)
 
     def _configure_dual_path(self):
