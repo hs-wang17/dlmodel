@@ -230,6 +230,33 @@ class base_model(nn.Module):
             nn.Linear(64, self.output_size)
         )
 
+    def seed_everything(self, seed):
+        random.seed(seed)                                   # 设置随机种子
+        np.random.seed(seed)                                # 设置NumPy的随机种子
+        torch.manual_seed(seed)                             # 设置PyTorch的随机种子
+        torch.cuda.manual_seed(seed)                        # 设置CUDA的随机种子
+        torch.cuda.manual_seed_all(seed)                    # 设置所有CUDA设备的随机种子
+        torch.backends.cudnn.deterministic = True           # 确保CUDA的行为是确定的
+        torch.backends.cudnn.benchmark = False              # 禁用CUDA的自动优化
+        
+    def _initialize_weights(self, seed):
+        self.seed_everything(seed)                          # 用固定种子初始化
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight)           # 对全连接层进行Kaiming Normal初始化
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)            # 初始化偏置为0
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)              # 批量归一化的权重初始化为1
+                nn.init.constant_(m.bias, 0)                # 批量归一化的偏置初始化为0
+            elif isinstance(m, nn.MultiheadAttention):      # 初始化MultiheadAttention的权重
+                nn.init.xavier_uniform_(m.in_proj_weight)   # 对Q、K、V的投影权重进行Xavier初始化
+                if m.in_proj_bias is not None:
+                    nn.init.constant_(m.in_proj_bias, 0)    # 初始化Q、K、V的投影偏置为0
+                nn.init.xavier_uniform_(m.out_proj.weight)  # 对输出投影权重进行Xavier初始化
+                if m.out_proj.bias is not None:
+                    nn.init.constant_(m.out_proj.bias, 0)   # 初始化输出投影偏置为0
+                
     def forward(self, x):
         x = x.to(self.selected_factor.device)
         # 路径1：主要特征处理

@@ -133,6 +133,7 @@ class ResBlock(nn.Module):
         self.bn1 = nn.BatchNorm1d(out_features)
         self.linear2 = nn.Linear(out_features, out_features)
         self.bn2 = nn.BatchNorm1d(out_features)
+
         # 如果输入输出维度不同，需要projection
         self.shortcut = nn.Sequential()
         if in_features != out_features:
@@ -148,54 +149,50 @@ class ResBlock(nn.Module):
         x += residual
         x = F.relu(x)
         return x
-
-# 层级金字塔融合模块
-class PyramidFusion(nn.Module):
-    def __init__(self):
+    
+    
+# 时空交织模块
+class STIBlock(nn.Module):
+    def __init__(self, dim, expansion=4):
         super().__init__()
-        # 上采样层
-        self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
-        # 特征转换层
-        self.conv_layers = nn.ModuleList([
-            nn.Conv1d(64, 32, kernel_size=1),
-        ])
-        # 注意力门控
-        self.attention_gates = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(64 + 32, 16),
-                nn.ReLU(),
-                nn.Linear(16, 1),
-                nn.Sigmoid()
-            )
-        ])
+        hidden_dim = dim * expansion
+        # 时间卷积（因果卷积）
+        self.temporal_conv = nn.Conv1d(
+            in_channels=dim, 
+            out_channels=hidden_dim,
+            kernel_size=3,
+            padding=1,
+            padding_mode='replicate'
+        )
+        # 空间注意力
+        self.spatial_attn = nn.Sequential(
+            nn.Linear(dim, dim // 4),
+            nn.ReLU(),
+            nn.Linear(dim // 4, dim),
+            nn.Sigmoid()
+        )
+        # 融合层
+        self.fusion_conv = nn.Conv1d(hidden_dim, dim, kernel_size=1)
         
-    def forward(self, features):
+    def forward(self, x):
         """
-        输入: 不同层级的特征列表 (维度从高到低) [L1:64D, L2:32D, L3:16D]
-        输出: 融合后的特征 (64D)
+        输入: [B, S, D] (S=空间维度数, D=特征维度)
+        输出: [B, S, D]
         """
-        fused = features[-1]                                                        # 从底层开始融合 (L3作为初始融合特征) L3:64D
-        for i in range(len(features) - 2, -1, -1):                                  # 逆序融合流程 [2, 1, 0]
-            fused = fused.unsqueeze(1)                                              # [B, D] -> [B, 1, D]
-            fused = self.upsample(fused)                                            # [B, 1, D] -> [B, 2, D]
-            fused = fused.flatten(start_dim=1)                                      # [B, 2, D] -> [B, 2D]
-            if i < len(self.conv_layers):                                           # 通道对齐
-                current_feat = self.conv_layers[i](features[i].unsqueeze(2)).squeeze(2)
-            else:
-                current_feat = features[i]
-            if i < len(self.attention_gates):                                       # 注意力门控融合
-                gate_input = torch.cat([current_feat, fused], dim=1)                # [B, D' + 2D]
-                alpha = self.attention_gates[i](gate_input)                         # [B, 1]
-                current_feat = current_feat.unsqueeze(1)                            # [B, D] -> [B, 1, D]
-                current_feat = self.upsample(current_feat)                          # [B, 1, D] -> [B, 2, D]
-                current_feat = current_feat.flatten(start_dim=1)                    # [B, 2, D] -> [B, 2D]
-                fused = alpha * current_feat + fused                                # [B, D']
-            else:
-                if fused.size(1) != current_feat.size(1):                           # 确保维度匹配
-                    fused = self.conv_layers[-1](fused.unsqueeze(2)).squeeze(2)     # [B, D']
-                fused = current_feat + fused                                        # [B, D']
-        return fused
-            
+        identity = x
+        # 时间维度处理 [B, S, D] -> [B, D, S] (通道优先)
+        x_temp = x.permute(0, 2, 1)                                 # [B, D, S]
+        x_temp = self.temporal_conv(x_temp)                         # [B, hidden_dim, S]
+        # 空间维度处理 [B, S, D] -> [B, D]
+        x_spatial = x.mean(dim=1)  # 全局平均池化
+        spatial_weight = self.spatial_attn(x_spatial).unsqueeze(1)  # [B, 1, D]
+        # 时空融合
+        x_fused = x_temp * spatial_weight.permute(0, 2, 1)          # [B, hidden_dim, S]
+        x_fused = self.fusion_conv(x_fused)                         # [B, D, S]
+        # 残差连接
+        return identity + x_fused.permute(0, 2, 1)                  # 恢复为 [B, S, D]
+    
+    
 class base_model(nn.Module):
     def __init__(self, output_size=1, drop_out=0.2, mask=None, factor_list=None, seed=1):
         super(base_model, self).__init__()
@@ -207,27 +204,24 @@ class base_model(nn.Module):
         self.main_features = factor_list[:1250]                     # 主要特征是factor_list中的前1250个
         self.output_size = output_size
         self.drop_out = drop_out
-        self._build_pyramid_architecture()
+        self._build_sti_architecture()
         self._initialize_weights(seed)
 
-    def _build_pyramid_architecture(self):                          # 构建金字塔融合结构
-        # 共享基础层
-        self.base_bn = nn.BatchNorm1d(len(self.selected_factor))
-        self.base_linear = nn.Linear(len(self.selected_factor), 64)
-        # 金字塔残差块
-        self.res_blocks = nn.ModuleList([
-            ResBlock(64, 64),                                       # Level 1
-            ResBlock(64, 32),                                       # Level 2
-            ResBlock(32, 16),                                       # Level 3
-        ])
-        # 金字塔融合模块
-        self.pyramid_fusion = PyramidFusion()
-        # 主要特征处理分支
-        self.main_branch = nn.Sequential(
-            nn.Linear(len(self.main_features), 64),
-            nn.BatchNorm1d(64),
-            nn.ReLU()
+    def _build_sti_architecture(self):
+        # 共享时空嵌入层
+        self.embed_dim = 512
+        self.main_embed = nn.Linear(len(self.main_features), self.embed_dim)
+        self.full_embed = nn.Linear(len(self.selected_factor), self.embed_dim)
+        # 时空交织模块
+        self.sti_blocks = nn.Sequential(
+            STIBlock(self.embed_dim, expansion=4),
+            STIBlock(self.embed_dim, expansion=4),
+            ResBlock(self.embed_dim, 256),
+            STIBlock(256, expansion=2),
+            ResBlock(256, 128)
         )
+        # 时空对比模块
+        self.contrastive_proj = nn.Linear(128, 64)
         # 最终输出层
         self.final_output = nn.Sequential(
             nn.Linear(128, 64),
@@ -236,37 +230,37 @@ class base_model(nn.Module):
         )
         
     def seed_everything(self, seed):
-        random.seed(seed)                                           # 设置随机种子
-        np.random.seed(seed)                                        # 设置NumPy的随机种子
-        torch.manual_seed(seed)                                     # 设置PyTorch的随机种子
-        torch.cuda.manual_seed(seed)                                # 设置CUDA的随机种子
-        torch.cuda.manual_seed_all(seed)                            # 设置所有CUDA设备的随机种子
-        torch.backends.cudnn.deterministic = True                   # 确保CUDA的行为是确定的
-        torch.backends.cudnn.benchmark = False                      # 禁用CUDA的自动优化
-
+        random.seed(seed)                                   # 设置随机种子
+        np.random.seed(seed)                                # 设置NumPy的随机种子
+        torch.manual_seed(seed)                             # 设置PyTorch的随机种子
+        torch.cuda.manual_seed(seed)                        # 设置CUDA的随机种子
+        torch.cuda.manual_seed_all(seed)                    # 设置所有CUDA设备的随机种子
+        torch.backends.cudnn.deterministic = True           # 确保CUDA的行为是确定的
+        torch.backends.cudnn.benchmark = False              # 禁用CUDA的自动优化
+        
     def _initialize_weights(self, seed):
-        self.seed_everything(seed)                                  # 用固定种子初始化
+        self.seed_everything(seed)                          # 用固定种子初始化
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight)                   # 对全连接层进行Kaiming Normal初始化
+                nn.init.kaiming_normal_(m.weight)           # 对全连接层进行Kaiming Normal初始化
                 if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)                    # 初始化偏置为0
+                    nn.init.constant_(m.bias, 0)            # 初始化偏置为0
             elif isinstance(m, nn.BatchNorm1d):
-                nn.init.constant_(m.weight, 1)                      # 批量归一化的权重初始化为1
-                nn.init.constant_(m.bias, 0)                        # 批量归一化的偏置初始化为0
+                nn.init.constant_(m.weight, 1)              # 批量归一化的权重初始化为1
+                nn.init.constant_(m.bias, 0)                # 批量归一化的偏置初始化为0
                 
     def forward(self, x):
         x = x.to(self.selected_factor.device)
-        base_feat = self.base_bn(x[:, self.selected_factor])
-        base_feat = F.relu(self.base_linear(base_feat))
-        pyramid_features = []                                       # 构建特征金字塔
-        for block in self.res_blocks:
-            base_feat = block(base_feat)
-            pyramid_features.append(base_feat.clone())
-        fused_feat = self.pyramid_fusion(pyramid_features)          # 金字塔特征融合
-        main_feat = self.main_branch(x[:, self.main_features])      # 主要特征分支
-        combined = torch.cat([fused_feat, main_feat], dim=1)        # 最终融合
-        return self.final_output(combined).squeeze(-1)
+        # 特征嵌入
+        main_emb = F.relu(self.main_embed(x[:, self.main_features]))  # [B, 512]
+        full_emb = F.relu(self.full_embed(x[:, self.selected_factor]))  # [B, 512]
+        # 时空联合建模
+        combined = torch.stack([main_emb, full_emb], dim=1)  # [B, 2, 512]
+        sti_output = self.sti_blocks(combined)  # [B, 128]
+        # 对比学习分支
+        contrastive_feat = F.normalize(self.contrastive_proj(sti_output), dim=1)
+        # 最终输出
+        return self.final_output(sti_output).squeeze(-1), contrastive_feat
 
 
 # 负责早停的类

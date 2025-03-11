@@ -133,6 +133,7 @@ class ResBlock(nn.Module):
         self.bn1 = nn.BatchNorm1d(out_features)
         self.linear2 = nn.Linear(out_features, out_features)
         self.bn2 = nn.BatchNorm1d(out_features)
+
         # 如果输入输出维度不同，需要projection
         self.shortcut = nn.Sequential()
         if in_features != out_features:
@@ -148,54 +149,7 @@ class ResBlock(nn.Module):
         x += residual
         x = F.relu(x)
         return x
-
-# 层级金字塔融合模块
-class PyramidFusion(nn.Module):
-    def __init__(self):
-        super().__init__()
-        # 上采样层
-        self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
-        # 特征转换层
-        self.conv_layers = nn.ModuleList([
-            nn.Conv1d(64, 32, kernel_size=1),
-        ])
-        # 注意力门控
-        self.attention_gates = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(64 + 32, 16),
-                nn.ReLU(),
-                nn.Linear(16, 1),
-                nn.Sigmoid()
-            )
-        ])
-        
-    def forward(self, features):
-        """
-        输入: 不同层级的特征列表 (维度从高到低) [L1:64D, L2:32D, L3:16D]
-        输出: 融合后的特征 (64D)
-        """
-        fused = features[-1]                                                        # 从底层开始融合 (L3作为初始融合特征) L3:64D
-        for i in range(len(features) - 2, -1, -1):                                  # 逆序融合流程 [2, 1, 0]
-            fused = fused.unsqueeze(1)                                              # [B, D] -> [B, 1, D]
-            fused = self.upsample(fused)                                            # [B, 1, D] -> [B, 2, D]
-            fused = fused.flatten(start_dim=1)                                      # [B, 2, D] -> [B, 2D]
-            if i < len(self.conv_layers):                                           # 通道对齐
-                current_feat = self.conv_layers[i](features[i].unsqueeze(2)).squeeze(2)
-            else:
-                current_feat = features[i]
-            if i < len(self.attention_gates):                                       # 注意力门控融合
-                gate_input = torch.cat([current_feat, fused], dim=1)                # [B, D' + 2D]
-                alpha = self.attention_gates[i](gate_input)                         # [B, 1]
-                current_feat = current_feat.unsqueeze(1)                            # [B, D] -> [B, 1, D]
-                current_feat = self.upsample(current_feat)                          # [B, 1, D] -> [B, 2, D]
-                current_feat = current_feat.flatten(start_dim=1)                    # [B, 2, D] -> [B, 2D]
-                fused = alpha * current_feat + fused                                # [B, D']
-            else:
-                if fused.size(1) != current_feat.size(1):                           # 确保维度匹配
-                    fused = self.conv_layers[-1](fused.unsqueeze(2)).squeeze(2)     # [B, D']
-                fused = current_feat + fused                                        # [B, D']
-        return fused
-            
+   
 class base_model(nn.Module):
     def __init__(self, output_size=1, drop_out=0.2, mask=None, factor_list=None, seed=1):
         super(base_model, self).__init__()
@@ -207,67 +161,83 @@ class base_model(nn.Module):
         self.main_features = factor_list[:1250]                     # 主要特征是factor_list中的前1250个
         self.output_size = output_size
         self.drop_out = drop_out
-        self._build_pyramid_architecture()
+        self._build_dynamic_gated_fusion()
         self._initialize_weights(seed)
 
-    def _build_pyramid_architecture(self):                          # 构建金字塔融合结构
-        # 共享基础层
-        self.base_bn = nn.BatchNorm1d(len(self.selected_factor))
-        self.base_linear = nn.Linear(len(self.selected_factor), 64)
-        # 金字塔残差块
-        self.res_blocks = nn.ModuleList([
-            ResBlock(64, 64),                                       # Level 1
-            ResBlock(64, 32),                                       # Level 2
-            ResBlock(32, 16),                                       # Level 3
-        ])
-        # 金字塔融合模块
-        self.pyramid_fusion = PyramidFusion()
-        # 主要特征处理分支
-        self.main_branch = nn.Sequential(
-            nn.Linear(len(self.main_features), 64),
-            nn.BatchNorm1d(64),
-            nn.ReLU()
+    def _build_dynamic_gated_fusion(self):
+        # 主要特征路径
+        self.main_bn = nn.BatchNorm1d(len(self.main_features))
+        self.main_linear = nn.Linear(len(self.main_features), 512)
+        self.main_res_blocks = nn.Sequential(
+            ResBlock(512, 512),
+            ResBlock(512, 256),
+            ResBlock(256, 128),
+            ResBlock(128, 64)
+        )
+        # 全部特征路径
+        self.full_bn = nn.BatchNorm1d(len(self.selected_factor))
+        self.full_linear = nn.Linear(len(self.selected_factor), 512)
+        self.full_res_blocks = nn.Sequential(
+            ResBlock(512, 512),
+            ResBlock(512, 256),
+            ResBlock(256, 128),
+            ResBlock(128, 64)
+        )
+        # 动态门控网络
+        self.gate_network = nn.Sequential(
+            nn.Linear(128, 64),                             # 输入是主要特征和全部特征的拼接
+            nn.ReLU(),
+            nn.Linear(64, 2),                               # 输出两个权重（主要特征和全部特征）
+            nn.Softmax(dim=1)                               # 权重归一化
         )
         # 最终输出层
         self.final_output = nn.Sequential(
-            nn.Linear(128, 64),
+            nn.Linear(64, 32),
             nn.Dropout(self.drop_out),
-            nn.Linear(64, self.output_size)
+            nn.Linear(32, self.output_size)
         )
-        
-    def seed_everything(self, seed):
-        random.seed(seed)                                           # 设置随机种子
-        np.random.seed(seed)                                        # 设置NumPy的随机种子
-        torch.manual_seed(seed)                                     # 设置PyTorch的随机种子
-        torch.cuda.manual_seed(seed)                                # 设置CUDA的随机种子
-        torch.cuda.manual_seed_all(seed)                            # 设置所有CUDA设备的随机种子
-        torch.backends.cudnn.deterministic = True                   # 确保CUDA的行为是确定的
-        torch.backends.cudnn.benchmark = False                      # 禁用CUDA的自动优化
 
+    def seed_everything(self, seed):
+        random.seed(seed)                                   # 设置随机种子
+        np.random.seed(seed)                                # 设置NumPy的随机种子
+        torch.manual_seed(seed)                             # 设置PyTorch的随机种子
+        torch.cuda.manual_seed(seed)                        # 设置CUDA的随机种子
+        torch.cuda.manual_seed_all(seed)                    # 设置所有CUDA设备的随机种子
+        torch.backends.cudnn.deterministic = True           # 确保CUDA的行为是确定的
+        torch.backends.cudnn.benchmark = False              # 禁用CUDA的自动优化
+        
     def _initialize_weights(self, seed):
-        self.seed_everything(seed)                                  # 用固定种子初始化
+        self.seed_everything(seed)                          # 用固定种子初始化
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight)                   # 对全连接层进行Kaiming Normal初始化
+                nn.init.kaiming_normal_(m.weight)           # 对全连接层进行Kaiming Normal初始化
                 if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)                    # 初始化偏置为0
+                    nn.init.constant_(m.bias, 0)            # 初始化偏置为0
             elif isinstance(m, nn.BatchNorm1d):
-                nn.init.constant_(m.weight, 1)                      # 批量归一化的权重初始化为1
-                nn.init.constant_(m.bias, 0)                        # 批量归一化的偏置初始化为0
-                
+                nn.init.constant_(m.weight, 1)              # 批量归一化的权重初始化为1
+                nn.init.constant_(m.bias, 0)                # 批量归一化的偏置初始化为0
+
     def forward(self, x):
         x = x.to(self.selected_factor.device)
-        base_feat = self.base_bn(x[:, self.selected_factor])
-        base_feat = F.relu(self.base_linear(base_feat))
-        pyramid_features = []                                       # 构建特征金字塔
-        for block in self.res_blocks:
-            base_feat = block(base_feat)
-            pyramid_features.append(base_feat.clone())
-        fused_feat = self.pyramid_fusion(pyramid_features)          # 金字塔特征融合
-        main_feat = self.main_branch(x[:, self.main_features])      # 主要特征分支
-        combined = torch.cat([fused_feat, main_feat], dim=1)        # 最终融合
-        return self.final_output(combined).squeeze(-1)
-
+        # 主要特征路径
+        main_feat = self.main_bn(x[:, self.main_features])
+        main_feat = F.relu(self.main_linear(main_feat))
+        main_feat = self.main_res_blocks(main_feat)                 # [B, 64]
+        # 全部特征路径
+        full_feat = self.full_bn(x[:, self.selected_factor])
+        full_feat = F.relu(self.full_linear(full_feat))
+        full_feat = self.full_res_blocks(full_feat)                 # [B, 64]
+        # 动态门控融合
+        gate_input = torch.cat([main_feat, full_feat], dim=1)       # [B, 128]
+        gate_weights = self.gate_network(gate_input)                # [B, 2]
+        # 加权融合
+        fused_feat = gate_weights[:, 0].unsqueeze(1) * main_feat + \
+                     gate_weights[:, 1].unsqueeze(1) * full_feat    # [B, 64]
+        # 残差连接
+        final_feat = fused_feat + main_feat                         # [B, 64]
+        # 最终输出
+        return self.final_output(final_feat).squeeze(-1)
+        
 
 # 负责早停的类
 class EarlyStopping:
