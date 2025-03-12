@@ -211,8 +211,14 @@ class base_model(nn.Module):
         self.selected_factor = torch.nonzero(final_mask).squeeze()  # 获取final_mask的索引
         self.main_features = factor_list[:1250]                     # 主要特征是factor_list中的前1250个
         # 主要特征处理
-        self.input_bn_main = nn.BatchNorm1d(self.main_features.shape[0])
-        self.input_linear_main = nn.Linear(self.main_features.shape[0], 512)
+        self.gcn_main = GCNLayer(
+            input_dim=len(self.main_features),                      # 输入维度=主要特征数量
+            hidden_dim=512,                                         # 输出维度与后续线性层匹配
+            num_layers=1,                                           # 可调整GCN层数
+            dropout=drop_out
+        )
+        self.input_bn_main = nn.BatchNorm1d(512)
+        self.input_linear_main = nn.Linear(512, 512)
         self.res_blocks_main = nn.Sequential(
             ResBlock(512, 512),
             ResBlock(512, 256),
@@ -225,8 +231,14 @@ class base_model(nn.Module):
             nn.Linear(64, 16)
         )
         # 主要特征和次要特征结合的处理
-        self.input_bn_combined = nn.BatchNorm1d(self.selected_factor.shape[0])
-        self.input_linear_combined = nn.Linear(self.selected_factor.shape[0], 512)
+        self.gcn_combined = GCNLayer(
+            input_dim=len(self.selected_factor),                    # 输入维度=选中特征数量
+            hidden_dim=512,                                         # 输出维度统一
+            num_layers=1,
+            dropout=drop_out
+        )
+        self.input_bn_combined = nn.BatchNorm1d(512)
+        self.input_linear_combined = nn.Linear(512, 512)
         self.res_blocks_combined = nn.Sequential(
             ResBlock(512, 512),
             ResBlock(512, 256),
@@ -238,7 +250,6 @@ class base_model(nn.Module):
             nn.Dropout(drop_out),
             nn.Linear(64, 16)
         )
-        self.gcn = GCNLayer(input_dim=32, hidden_dim=32, num_layers=2, dropout=drop_out)
         self.merge_layer = nn.Linear(32, output_size)   # 输入是两个输出，合并后得到最终输出
         self._initialize_weights(seed)
 
@@ -269,24 +280,24 @@ class base_model(nn.Module):
 
     def forward(self, x):
         x = x.to(self.selected_factor.device)           # 将输入移动到正确的设备
-        x_main = x[:, self.main_features]               # 提取主要特征（factor_list中的前1250个）
-        x_combined = x[:, self.selected_factor]
-        # 主要特征的处理
+        # 处理主要特征分支
+        x_main = x[:, self.main_features]
+        edge_main, weight_main = construct_graph(x_main, threshold=0.8)
+        x_main = self.gcn_main(x_main, edge_main, weight_main)
         x_main = self.input_bn_main(x_main)
         x_main = F.relu(self.input_linear_main(x_main))
         x_main = self.res_blocks_main(x_main)
-        output_main = self.output_main(x_main).squeeze(-1)
-        # 主要特征和次要特征的结合处理
+        output_main = self.output_main(x_main)
+        # 处理结合特征分支
+        x_combined = x[:, self.selected_factor]
+        edge_combined, weight_combined = construct_graph(x_combined, threshold=0.8)
+        x_combined = self.gcn_combined(x_combined, edge_combined, weight_combined)
         x_combined = self.input_bn_combined(x_combined)
         x_combined = F.relu(self.input_linear_combined(x_combined))
         x_combined = self.res_blocks_combined(x_combined)
-        output_combined = self.output_combined(x_combined).squeeze(-1)
-        # 合并特征并应用GCN
-        combined = torch.cat((output_main, output_combined), dim=1)
-        edge_index, edge_weight = construct_graph(combined)
-        gcn_output = self.gcn(combined, edge_index, edge_weight)
-        # 最终输出
-        final_output = self.merge_layer(gcn_output).squeeze(-1)
+        output_combined = self.output_combined(x_combined)
+        # 合并输出
+        final_output = self.merge_layer(torch.cat([output_main, output_combined], dim=1))
         return final_output
 
 
