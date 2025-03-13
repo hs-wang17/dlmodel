@@ -12,7 +12,7 @@ from methods.processing import *
 from methods.hyper import *
 
 
-wpcc = [PartialCosLoss(), SimuTradeLoss(), ExcessReturnLoss()]
+wpcc = [PartialCosLoss(), ExcessReturnLoss()]
 
 # K折交叉验证训练中的一折
 def train_one_Fold(
@@ -132,9 +132,9 @@ def train_one_Fold(
         for n in range(multi_model):
             model_list[n].train()
         for step, (batch_x1, batch_group, batch_y) in enumerate(loader_train):
-            batch_x1 = batch_x1.reshape(-1, batch_x1.size(2)).to(torch.device("cuda:0"))
-            batch_y = batch_y.reshape(-1, batch_y.size(2)).to(torch.device("cuda:0"))
-            batch_group = batch_group.reshape(-1, batch_group.size(2)).to(torch.device("cuda:0"))
+            batch_x1 = batch_x1.reshape(-1, batch_x1.size(2)).to(torch.device("cuda:7"))
+            batch_y = batch_y.reshape(-1, batch_y.size(2)).to(torch.device("cuda:7"))
+            batch_group = batch_group.reshape(-1, batch_group.size(2)).to(torch.device("cuda:7"))
             nan_index = torch.isnan(batch_y[:, 0])
             batch_y = batch_y[~nan_index]
             batch_x1 = batch_x1[~nan_index]
@@ -158,9 +158,9 @@ def train_one_Fold(
         with torch.no_grad():
             val_loss_list = []
             for step, (batch_x1, batch_group, batch_y) in enumerate(loader_val):
-                batch_x1 = batch_x1.reshape(-1, batch_x1.size(2)).to(torch.device("cuda:0"))
-                batch_y = batch_y.reshape(-1, batch_y.size(2)).to(torch.device("cuda:0"))
-                batch_group = batch_group.reshape(-1, batch_group.size(2)).to(torch.device("cuda:0"))
+                batch_x1 = batch_x1.reshape(-1, batch_x1.size(2)).to(torch.device("cuda:6"))
+                batch_y = batch_y.reshape(-1, batch_y.size(2)).to(torch.device("cuda:6"))
+                batch_group = batch_group.reshape(-1, batch_group.size(2)).to(torch.device("cuda:6"))
                 nan_index = torch.isnan(batch_y[:, 0])
                 batch_y = batch_y[~nan_index]
                 batch_x1 = batch_x1[~nan_index]
@@ -204,7 +204,7 @@ def train_one_Fold(
             outputs_list = []
             # 对每个批次，取前 5 个样本并进行处理（一周数据）
             for i in range(min(5, batch_y.size(0)) - 1):
-                batch_y_list.append(batch_y[i].to(torch.device("cuda:0")))
+                batch_y_list.append(batch_y[i].to(torch.device("cuda:6")))
                 temp_output = [model_list[n](batch_x1[i]) for n in range(multi_model)]
                 outputs_list.append(temp_output)
             loss_list_model = []
@@ -212,7 +212,7 @@ def train_one_Fold(
                 loss_list_day = []
                 for i in range(min(5, batch_y.size(0)) - 1):
                     outputs = outputs_list[i][n]
-                    loss_list_day.append(simu_trade(outputs, batch_y_list[i]).to(torch.device("cuda:0")))
+                    loss_list_day.append(simu_trade(outputs, batch_y_list[i]).to(torch.device("cuda:6")))
                 loss_week = torch.mean(torch.tensor(loss_list_day))
                 loss_list_model.append(loss_week)
                 
@@ -221,7 +221,7 @@ def train_one_Fold(
             batch_y = batch_y.reshape(-1, batch_y.size(2))
             nan_index = torch.isnan(batch_y[:, 0])
             test_outputs = [model_list[n](batch_x1) for n in range(multi_model)]
-            test_outputs = torch.stack([test_outputs[j].to(torch.device("cuda:0")) for j in topk_last_week]).mean(dim=0)
+            test_outputs = torch.stack([test_outputs[j].to(torch.device("cuda:6")) for j in topk_last_week]).mean(dim=0)
             _, topk_last_week = torch.topk(torch.tensor(loss_list_model), 6, largest=True)  # 修改数值6，可只保留最好的k个模型
 
             out_mean = test_outputs.mean(axis=0)

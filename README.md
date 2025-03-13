@@ -188,16 +188,6 @@
 
 ---
 
-20250319:
-
-1. 修改WPCC损失函数为成交量加权：self.wpcc_org(output, target, amount)
-
-2. 修改主要因子和辅助因子的模型结构（主要因子单独使用ResNet+主要&辅助因子合并使用ResNet）
-
-3. 在模型输出端增加因子的图结构
-
----
-
 20250320:
 
 1. 修改WPCC损失函数为成交量加权：self.wpcc_org(output, target, amount)
@@ -212,7 +202,14 @@
 
 1. 修改WPCC损失函数为成交量加权：self.wpcc_org(output, target, amount)
 
-2. 交替使用WPCC、simu_trade和excess_loss进行训练（3:1:1）
+2. 交替使用WPCC和excess_loss进行训练（4:1）
 
 ---
 
+20250322:
+
+1. 修改WPCC损失函数为成交量加权：self.wpcc_org(output, target, amount)
+
+2. 交替使用WPCC、simu_trade和excess_loss进行训练（3:1:1）
+
+---

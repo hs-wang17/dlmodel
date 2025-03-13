@@ -127,29 +127,56 @@ def generate_mask(x, corr_thres=0.9):
 # 同时训练的多个模型的子模型，后面其实也可以进一步改成支持时间序列input的LSTM或stockMixer，这个的尝试可能得到下周一了
 # 这里面用来决定因子分组（即每个子模型接收哪些因子）的是一个tensor形式的索引factor_list，可能需要单独存储
 # 用于筛除高相关因子的mask可能也需要单独存储
-def construct_graph(features, threshold=0.8, absolute=True):
+def construct_graph(features, threshold=0.8, absolute=True, chunk_size=1000):
     """
-    基于皮尔逊相关系数构建图结构
+    基于皮尔逊相关系数构建特征图结构（特征间相关系数）
     Args:
         features: 输入特征张量，形状为 (num_samples, num_features)
         threshold: 相关系数阈值，绝对值超过此值时保留边
         absolute: 是否使用相关系数的绝对值
+        chunk_size: 分块大小，控制显存占用
     Returns:
-        edge_index: 边的索引 [2, num_edges]
+        edge_index: 边的索引 [2, num_edges] (特征索引)
         edge_weight: 边的权重（相关系数值）
     """
-    corr_matrix = torch.corrcoef(features)              # 计算相关系数矩阵，形状 [num_samples, num_samples]
-    mask = ~torch.eye(
-        corr_matrix.shape[0], 
-        dtype=torch.bool, 
-        device=features.device
-    )                                                   # 处理对角线（排除自环）
-    if absolute:                                        # 根据阈值筛选边
-        mask = mask & (torch.abs(corr_matrix) > threshold)
-    else:
-        mask = mask & (corr_matrix > threshold)
-    edge_index = torch.nonzero(mask).t().contiguous()   # 形状 [2, num_edges]
-    edge_weight = corr_matrix[mask]                     # 形状 [num_edges]
+    feature_matrix = features.float()
+    num_features = feature_matrix.shape[0]
+    device = feature_matrix.device
+    edge_index = []
+    edge_weight = []
+    # 分块遍历特征对
+    for i in range(0, num_features, chunk_size):
+        for j in range(i + 1, num_features, chunk_size):            # 仅计算上三角部分
+            chunk_i = feature_matrix[i : i + chunk_size]            # 获取当前特征块
+            chunk_j = feature_matrix[j : j + chunk_size]
+            # 计算块间相关系数矩阵 [chunk_i_size, chunk_j_size]
+            corr_chunk = torch.corrcoef(
+                torch.cat([chunk_i, chunk_j], dim=0)
+            )[:chunk_i.shape[0], chunk_i.shape[0]:]
+            # 生成坐标网格
+            rows, cols = torch.meshgrid(
+                torch.arange(chunk_i.shape[0], device=device) + i,
+                torch.arange(chunk_j.shape[0], device=device) + j,
+                indexing='ij'
+            )
+            # 筛选有效边
+            mask = (rows != cols)
+            if absolute:
+                mask &= (torch.abs(corr_chunk) > threshold)
+            else:
+                mask &= (corr_chunk > threshold)
+            # 添加有效边
+            valid_rows = rows[mask]
+            valid_cols = cols[mask]
+            chunk_edges = torch.stack([valid_rows, valid_cols], dim=0)
+            edge_index.append(chunk_edges)
+            edge_weight.append(corr_chunk[mask])
+    # 合并结果并去重
+    edge_index = torch.cat(edge_index, dim=1) if edge_index else torch.empty((2, 0), dtype=torch.long, device=device)
+    edge_weight = torch.cat(edge_weight, dim=0) if edge_weight else torch.empty((0,), dtype=torch.float, device=device)
+    edge_index, unique_idx = torch.unique(edge_index, dim=1, return_inverse=True)
+    edge_weight = edge_weight[unique_idx]
+    # edge_weight = torch.nan_to_num(edge_weight, nan=0.0, posinf=0.0, neginf=0.0)
     return edge_index, edge_weight
 
 class ResBlock(nn.Module):
@@ -199,6 +226,7 @@ class GCNLayer(nn.Module):
             if i == 0 and self.residual_fc is not None:
                 residual = self.residual_fc(residual)
             x += residual
+        x = F.layer_norm(x, x.shape[1:])  # 添加 LayerNorm
         return x
 
 class base_model(nn.Module):
@@ -213,15 +241,14 @@ class base_model(nn.Module):
         # 主要特征处理
         self.gcn_main = GCNLayer(
             input_dim=len(self.main_features),                      # 输入维度=主要特征数量
-            hidden_dim=512,                                         # 输出维度与后续线性层匹配
+            hidden_dim=256,                                         # 输出维度与后续线性层匹配
             num_layers=1,                                           # 可调整GCN层数
             dropout=drop_out
         )
-        self.input_bn_main = nn.BatchNorm1d(512)
-        self.input_linear_main = nn.Linear(512, 512)
+        self.input_bn_main = nn.BatchNorm1d(256)
+        self.input_linear_main = nn.Linear(256, 256)
         self.res_blocks_main = nn.Sequential(
-            ResBlock(512, 512),
-            ResBlock(512, 256),
+            ResBlock(256, 256),
             ResBlock(256, 128),
             ResBlock(128, 64)
         )
@@ -233,15 +260,14 @@ class base_model(nn.Module):
         # 主要特征和次要特征结合的处理
         self.gcn_combined = GCNLayer(
             input_dim=len(self.selected_factor),                    # 输入维度=选中特征数量
-            hidden_dim=512,                                         # 输出维度统一
+            hidden_dim=256,                                         # 输出维度统一
             num_layers=1,
             dropout=drop_out
         )
-        self.input_bn_combined = nn.BatchNorm1d(512)
-        self.input_linear_combined = nn.Linear(512, 512)
+        self.input_bn_combined = nn.BatchNorm1d(256)
+        self.input_linear_combined = nn.Linear(256, 256)
         self.res_blocks_combined = nn.Sequential(
-            ResBlock(512, 512),
-            ResBlock(512, 256),
+            ResBlock(256, 256),
             ResBlock(256, 128),
             ResBlock(128, 64)
         )
@@ -277,27 +303,37 @@ class base_model(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)        # 初始化偏置（如果存在）为0
 
-
     def forward(self, x):
         x = x.to(self.selected_factor.device)           # 将输入移动到正确的设备
         # 处理主要特征分支
         x_main = x[:, self.main_features]
         edge_main, weight_main = construct_graph(x_main, threshold=0.8)
+        # print('edge_main', edge_main)
+        # print('weight_main', weight_main)
         x_main = self.gcn_main(x_main, edge_main, weight_main)
+        # x_main = self.gcn_main(torch.nan_to_num(x_main, nan=0.0, posinf=0.0, neginf=0.0), edge_main, weight_main)
+        # print('x_main', x_main)
         x_main = self.input_bn_main(x_main)
         x_main = F.relu(self.input_linear_main(x_main))
         x_main = self.res_blocks_main(x_main)
         output_main = self.output_main(x_main)
+        # print('output_main', output_main)
         # 处理结合特征分支
         x_combined = x[:, self.selected_factor]
         edge_combined, weight_combined = construct_graph(x_combined, threshold=0.8)
+        # print('edge_combined', edge_combined)
+        # print('weight_combined', weight_combined)
         x_combined = self.gcn_combined(x_combined, edge_combined, weight_combined)
+        # x_combined = self.gcn_combined(torch.nan_to_num(x_combined, nan=0.0, posinf=0.0, neginf=0.0), edge_combined, weight_combined)
+        # print('x_combined', x_combined)
         x_combined = self.input_bn_combined(x_combined)
         x_combined = F.relu(self.input_linear_combined(x_combined))
         x_combined = self.res_blocks_combined(x_combined)
         output_combined = self.output_combined(x_combined)
+        # print('output_combined', output_combined)
         # 合并输出
-        final_output = self.merge_layer(torch.cat([output_main, output_combined], dim=1))
+        final_output = self.merge_layer(torch.cat([output_main, output_combined], dim=1)).squeeze(-1)
+        # print('final_output', final_output)
         return final_output
 
 
@@ -401,6 +437,7 @@ class PartialCosLoss(nn.Module):
     def forward(self, output, target):
         amount = target[:, 4].float().to(output.device)
         target = target[:, 0].float().to(output.device)
+        # print(self.wpcc_org(output, target, amount))
         return self.wpcc_org(output, target, amount)  # amount
 
 # 既可以调整成损失又可以当验证集等指标的模拟交易收益，这个目前是在测试集每周选一次模型中用到

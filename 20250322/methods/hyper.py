@@ -1,6 +1,6 @@
 import torch
 
-main_folder_name = '20250319'
+main_folder_name = '20250322'
 GPU_COUNT = torch.cuda.device_count()
 
 # 设置训练参数

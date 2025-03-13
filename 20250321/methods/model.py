@@ -447,16 +447,15 @@ class ExcessReturnLoss(nn.Module):
         Returns:
             loss: 可微分的损失值
         """
-        device = output.device
-        true_yield = target[:, 0].float().to(device)                # 真实收益率 [batch_size]
-        liquidity = target[:, 4].float().to(device)                 # 每只股票可买入上限 [batch_size]
-        pred_yield = output.squeeze(1)                              # 预测收益率 [batch_size]
+        true_yield = target[:, 0].float().to(output.device)         # 真实收益率 [batch_size]
+        liquidity = target[:, 4].float().to(output.device)          # 每只股票可买入上限 [batch_size]
+        pred_yield = output                                         # 预测收益率 [batch_size]
         # 步骤1: 生成选择权重 (可微分的top-k近似)
         # 计算相对排名得分
         rank_score = pred_yield.unsqueeze(0) - pred_yield.unsqueeze(1)          # [N, N]
         rank_score = torch.sigmoid(rank_score / self.temperature).mean(dim=1)   # [N]
         # 生成选择概率 (前k只的概率接近1，其余接近0)
-        selection_prob = torch.sigmoid((rank_score - rank_score.topk(self.top_k)[0][-1]) / self.temperature)
+        selection_prob = torch.sigmoid((rank_score -  rank_score.topk(self.top_k)[0][-1]) / self.temperature)
         # 步骤2: 可微分资金分配
         # 计算每只股票的理论最大购买金额
         alloc_weight = selection_prob * liquidity                   # 权重考虑流动性和选择概率
@@ -470,6 +469,39 @@ class ExcessReturnLoss(nn.Module):
         
 
 # 训练函数
+def get_available_gpu(min_memory_required=1024, preferred_gpus=[6, 7]):
+    """
+    优先使用指定的 GPU（如 6 或 7），如果不可用则选择显存剩余最多的 GPU
+    Args:
+        min_memory_required (int): 最小需要的显存（单位：MB）
+        preferred_gpus (list): 优先使用的 GPU 设备号
+    Returns:
+        int: 可用的 GPU 设备号
+    """
+    # 检查优先 GPU
+    for i in preferred_gpus:
+        if i >= torch.cuda.device_count():
+            continue  # 跳过不存在的 GPU
+        total_memory = torch.cuda.get_device_properties(i).total_memory
+        allocated_memory = torch.cuda.memory_allocated(i)
+        free_memory = (total_memory - allocated_memory) / 1024**2  # 转换为 MB
+        if free_memory >= min_memory_required:
+            return i
+    
+    # 如果优先 GPU 不可用，则选择显存剩余最多的 GPU
+    available_gpus = []
+    for i in range(torch.cuda.device_count()):
+        total_memory = torch.cuda.get_device_properties(i).total_memory
+        allocated_memory = torch.cuda.memory_allocated(i)
+        free_memory = (total_memory - allocated_memory) / 1024**2  # 转换为 MB
+        if free_memory >= min_memory_required:
+            available_gpus.append((i, free_memory))
+    
+    if not available_gpus:
+        raise RuntimeError("No available GPU with sufficient memory!")
+    
+    return max(available_gpus, key=lambda x: x[1])[0]
+
 def backward_and_step(n, optimizer, batch_x, batch_group, batch_y, model, early_stop, val_loss_min, loss_func_list):
     '''
     训练一个step的函数，带L1正则化，这个正则化系数lambda是比较早调优的结果
@@ -486,8 +518,6 @@ def backward_and_step(n, optimizer, batch_x, batch_group, batch_y, model, early_
     lambda_ = 0.1
     if n % 5 == 0:
         loss_func = loss_func_list[1]
-    elif n % 5 == 2:
-        loss_func = loss_func_list[2]
     else:
         loss_func = loss_func_list[0]
     if early_stop[n] == False:
@@ -511,7 +541,9 @@ def backward_and_step(n, optimizer, batch_x, batch_group, batch_y, model, early_
         optimizer.second_step(zero_grad=True)
     else:
         return_loss = val_loss_min[n]
-    return return_loss.to(torch.device("cuda:0"))
+    # device = torch.device(f"cuda:{get_available_gpu(preferred_gpus=[6, 7])}")
+    # return return_loss.to(device)
+    return return_loss.to(torch.device("cuda:7"))
 
 # 辅助因子平衡K均值聚类
 class BalancedKMeans:
