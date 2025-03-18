@@ -13,8 +13,6 @@ from methods.hyper import *
 
 
 wpcc = PartialCosLoss()
-wpcc_ = SimuTradeLoss()
-wpcc__ = ExcessReturnLoss()
 
 # K折交叉验证训练中的一折
 def train_one_Fold(
@@ -147,7 +145,7 @@ def train_one_Fold(
                 futures_list.append(
                     torch.jit.fork(
                         backward_and_step, n, optimizer_list[n], batch_x1, batch_group, batch_y,
-                        model_list[n], early_stopping.early_stop, early_stopping.val_loss_min, wpcc, wpcc_, wpcc__
+                        model_list[n], early_stopping.early_stop, early_stopping.val_loss_min, wpcc
                         )
                     )
             losses = [torch.jit.wait(future) for future in futures_list]

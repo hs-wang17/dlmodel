@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch_geometric.nn import GCNConv
 from sklearn.metrics import mutual_info_score
 
 
@@ -126,6 +127,58 @@ def generate_mask(x, corr_thres=0.9):
 # 同时训练的多个模型的子模型，后面其实也可以进一步改成支持时间序列input的LSTM或stockMixer，这个的尝试可能得到下周一了
 # 这里面用来决定因子分组（即每个子模型接收哪些因子）的是一个tensor形式的索引factor_list，可能需要单独存储
 # 用于筛除高相关因子的mask可能也需要单独存储
+def construct_graph(features, threshold=0.8, absolute=True, chunk_size=1000):
+    """
+    基于皮尔逊相关系数构建特征图结构（特征间相关系数）
+    Args:
+        features: 输入特征张量，形状为 (num_samples, num_features)
+        threshold: 相关系数阈值，绝对值超过此值时保留边
+        absolute: 是否使用相关系数的绝对值
+        chunk_size: 分块大小，控制显存占用
+    Returns:
+        edge_index: 边的索引 [2, num_edges] (特征索引)
+        edge_weight: 边的权重（相关系数值）
+    """
+    feature_matrix = features.float()
+    num_features = feature_matrix.shape[0]
+    device = feature_matrix.device
+    edge_index = []
+    edge_weight = []
+    # 分块遍历特征对
+    for i in range(0, num_features, chunk_size):
+        for j in range(i + 1, num_features, chunk_size):            # 仅计算上三角部分
+            chunk_i = feature_matrix[i : i + chunk_size]            # 获取当前特征块
+            chunk_j = feature_matrix[j : j + chunk_size]
+            # 计算块间相关系数矩阵 [chunk_i_size, chunk_j_size]
+            corr_chunk = torch.corrcoef(
+                torch.cat([chunk_i, chunk_j], dim=0)
+            )[:chunk_i.shape[0], chunk_i.shape[0]:]
+            # 生成坐标网格
+            rows, cols = torch.meshgrid(
+                torch.arange(chunk_i.shape[0], device=device) + i,
+                torch.arange(chunk_j.shape[0], device=device) + j,
+                indexing='ij'
+            )
+            # 筛选有效边
+            mask = (rows != cols)
+            if absolute:
+                mask &= (torch.abs(corr_chunk) > threshold)
+            else:
+                mask &= (corr_chunk > threshold)
+            # 添加有效边
+            valid_rows = rows[mask]
+            valid_cols = cols[mask]
+            chunk_edges = torch.stack([valid_rows, valid_cols], dim=0)
+            edge_index.append(chunk_edges)
+            edge_weight.append(corr_chunk[mask])
+    # 合并结果并去重
+    edge_index = torch.cat(edge_index, dim=1) if edge_index else torch.empty((2, 0), dtype=torch.long, device=device)
+    edge_weight = torch.cat(edge_weight, dim=0) if edge_weight else torch.empty((0,), dtype=torch.float, device=device)
+    edge_index, unique_idx = torch.unique(edge_index, dim=1, return_inverse=True)
+    edge_weight = edge_weight[unique_idx]
+    # edge_weight = torch.nan_to_num(edge_weight, nan=0.0, posinf=0.0, neginf=0.0)
+    return edge_index, edge_weight
+
 class ResBlock(nn.Module):
     def __init__(self, in_features, out_features):
         super(ResBlock, self).__init__()
@@ -133,8 +186,6 @@ class ResBlock(nn.Module):
         self.bn1 = nn.BatchNorm1d(out_features)
         self.linear2 = nn.Linear(out_features, out_features)
         self.bn2 = nn.BatchNorm1d(out_features)
-
-        # 如果输入输出维度不同，需要projection
         self.shortcut = nn.Sequential()
         if in_features != out_features:
             self.shortcut = nn.Sequential(
@@ -147,8 +198,33 @@ class ResBlock(nn.Module):
         x = F.relu(self.bn1(self.linear1(x)))
         x = self.bn2(self.linear2(x))
         x += residual
-        x = F.relu(x)
-        return x
+        return F.relu(x)
+
+class MergedGCN(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers=2, dropout=0.1):
+        super(MergedGCN, self).__init__()
+        self.num_layers = num_layers
+        self.convs = nn.ModuleList()
+        self.bns = nn.ModuleList()
+        self.convs.append(GCNConv(input_dim, hidden_dim))
+        self.bns.append(nn.BatchNorm1d(hidden_dim))
+        for _ in range(num_layers - 1):
+            self.convs.append(GCNConv(hidden_dim, hidden_dim))
+            self.bns.append(nn.BatchNorm1d(hidden_dim))
+        self.dropout = dropout
+        self.residual_fc = nn.Linear(input_dim, hidden_dim) if input_dim != hidden_dim else None
+
+    def forward(self, x, edge_index, edge_weight=None):
+        residual = x
+        for i in range(self.num_layers):
+            x = self.convs[i](x, edge_index, edge_weight)
+            x = self.bns[i](x)
+            x = F.leaky_relu(x, 0.1)
+            x = F.dropout(x, p=self.dropout, training=self.training)
+            if i == 0 and self.residual_fc is not None:
+                residual = self.residual_fc(residual)
+            x += residual
+        return F.layer_norm(x, x.shape[1:])
 
 class base_model(nn.Module):
     def __init__(self, output_size=1, drop_out=0.2, mask=None, factor_list=None, seed=1):
@@ -156,81 +232,63 @@ class base_model(nn.Module):
         ic_mask = mask.to(dtype=torch.bool)
         factor_mask = torch.zeros(ic_mask.shape, dtype=torch.bool).to(ic_mask.device)
         factor_mask[factor_list] = True
-        final_mask = ic_mask & factor_mask                          # final_mask是ic_mask和factor_mask的交集
-        self.selected_factor = torch.nonzero(final_mask).squeeze()  # 获取final_mask的索引
-        # 主要特征和次要特征的分离
-        self.main_features = factor_list[:1250]                      # 主要特征是factor_list中的前1250个
-        self.secondary_features = factor_list[1250:]                 # 次要特征是factor_list中的1250以后的部分
-        # 主要特征处理
-        self.input_bn_main = nn.BatchNorm1d(self.main_features.shape[0])
-        self.input_linear_main = nn.Linear(self.main_features.shape[0], 512)
-        self.res_blocks_main = nn.Sequential(
-            ResBlock(512, 512),
-            ResBlock(512, 256),
+        final_mask = ic_mask & factor_mask
+        self.selected_factors = torch.nonzero(final_mask).squeeze()
+        self.main_features = factor_list[:1250]
+        # 主要特征处理分支
+        self.main_processor = nn.Sequential(
+            nn.Linear(len(self.main_features), 256),
+            nn.BatchNorm1d(256),
+            ResBlock(256, 256),
             ResBlock(256, 128),
-            ResBlock(128, 64)
-        )
-        # 主要特征的输出
-        self.output_main = nn.Sequential(
+            ResBlock(128, 64),
             nn.Dropout(drop_out),
             nn.Linear(64, 16)
         )
-        # 主要特征和次要特征结合的处理
-        self.input_bn_combined = nn.BatchNorm1d(self.selected_factor.shape[0])
-        self.input_linear_combined = nn.Linear(self.selected_factor.shape[0], 512)
-        self.res_blocks_combined = nn.Sequential(
-            ResBlock(512, 512),
-            ResBlock(512, 256),
+        # 组合特征处理分支
+        self.combined_processor = nn.Sequential(
+            nn.Linear(len(self.selected_factors), 256),
+            nn.BatchNorm1d(256),
+            ResBlock(256, 256),
             ResBlock(256, 128),
-            ResBlock(128, 64)
-        )
-        # 合并后的输出
-        self.output_combined = nn.Sequential(
+            ResBlock(128, 64),
             nn.Dropout(drop_out),
             nn.Linear(64, 16)
         )
-        # 新增的一层神经网络，用来合并output_main和output_combined
-        self.merge_layer = nn.Linear(32, output_size)   # 输入是两个输出，合并后得到最终输出
+        # 合并后的GCN处理
+        self.merged_gcn = MergedGCN(
+            input_dim=32,  # 16+16 from two branches
+            hidden_dim=64,
+            num_layers=1,
+            dropout=drop_out
+        )
+        self.final_output = nn.Linear(64, output_size)
         self._initialize_weights(seed)
 
-    def seed_everything(self, seed):
-        random.seed(seed)                               # 设置随机种子
-        np.random.seed(seed)                            # 设置NumPy的随机种子
-        torch.manual_seed(seed)                         # 设置PyTorch的随机种子
-        torch.cuda.manual_seed(seed)                    # 设置CUDA的随机种子
-        torch.cuda.manual_seed_all(seed)                # 设置所有CUDA设备的随机种子
-        torch.backends.cudnn.deterministic = True       # 确保CUDA的行为是确定的
-        torch.backends.cudnn.benchmark = False          # 禁用CUDA的自动优化
-
     def _initialize_weights(self, seed):
-        self.seed_everything(seed)                      # 用固定种子初始化
+        # 保持原有的初始化逻辑
+        torch.manual_seed(seed)
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight)       # 对全连接层进行Kaiming Normal初始化
+                nn.init.kaiming_normal_(m.weight)
                 if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)        # 初始化偏置为0
+                    nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.BatchNorm1d):
-                nn.init.constant_(m.weight, 1)          # 批量归一化的权重初始化为1
-                nn.init.constant_(m.bias, 0)            # 批量归一化的偏置初始化为0
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, GCNConv):
+                nn.init.kaiming_normal_(m.lin.weight, mode='fan_out', nonlinearity='leaky_relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        x = x.to(self.selected_factor.device)           # 将输入移动到正确的设备
-        x_main = x[:, self.main_features]               # 提取主要特征（factor_list中的前1250个）
-        x_combined = x[:, self.selected_factor]
-        # 主要特征的处理
-        x_main = self.input_bn_main(x_main)
-        x_main = F.relu(self.input_linear_main(x_main))
-        x_main = self.res_blocks_main(x_main)
-        output_main = self.output_main(x_main).squeeze(-1)
-        # 主要特征和次要特征的结合处理
-        x_combined = self.input_bn_combined(x_combined)
-        x_combined = F.relu(self.input_linear_combined(x_combined))
-        x_combined = self.res_blocks_combined(x_combined)
-        output_combined = self.output_combined(x_combined).squeeze(-1)
-        # 使用merge_layer合并两个输出
-        output = torch.cat((output_main, output_combined), dim=1)
-        final_output = self.merge_layer(output).squeeze(-1)
-        return final_output
+        x = x.to(self.selected_factors.device)                              # 将输入移动到正确的设备
+        main_out = self.main_processor(x[:, self.main_features])            # 处理主要特征
+        combined_out = self.combined_processor(x[:, self.selected_factors]) # 处理组合特征
+        merged = torch.cat([main_out, combined_out], dim=1)                 # 合并特征
+        edge_index, edge_weight = construct_graph(merged, threshold=0.8)    # 构建合并特征的图结构
+        gcn_out = self.merged_gcn(merged, edge_index, edge_weight)          # GCN处理
+        return self.final_output(gcn_out).squeeze(-1)                       # 最终输出
 
 
 # 负责早停的类
@@ -333,16 +391,17 @@ class PartialCosLoss(nn.Module):
     def forward(self, output, target):
         amount = target[:, 4].float().to(output.device)
         target = target[:, 0].float().to(output.device)
+        # print(self.wpcc_org(output, target, amount))
         return self.wpcc_org(output, target, amount)  # amount
 
-# 既可以调整成损失又可以当验证集等指标的模拟交易收益
+# 既可以调整成损失又可以当验证集等指标的模拟交易收益，这个目前是在测试集每周选一次模型中用到
 def simu_trade(output, target):
     capital = 5e8                                                           # 总资金
     target = target.to(output.device)
     buyable_amount = target[:, 4].unsqueeze(-1).float().to(output.device)   # 每只股票最大可买入的资金数额
-    true_yields = target[:, 0].unsqueeze(-1).float().to(output.device)      # 真实收益率
-    predicted_yields = output.unsqueeze(-1).float()                         # 预测收益率
-    valid_mask = ~torch.isnan(buyable_amount) & ~torch.isnan(true_yields)   # 过滤掉缺失值
+    true_yields = target[:, 0].unsqueeze(-1).float().to(output.device)      # 每只股票的真实收益率
+    predicted_yields = output.unsqueeze(-1).float()                         # 模型预测的收益率
+    valid_mask = ~torch.isnan(buyable_amount) & ~torch.isnan(true_yields)   # 过滤掉缺失值对应的数据
     buyable_amount = buyable_amount[valid_mask]
     true_yields = true_yields[valid_mask]
     predicted_yields = predicted_yields[valid_mask]
@@ -353,121 +412,8 @@ def simu_trade(output, target):
     total_profit = torch.sum(buy_amount * true_yields) / capital            # 计算总收益率：股票收益总和 / 总资金
     return total_profit
 
-
-class SimuTradeLoss(nn.Module):
-    def __init__(self, temperature=1e-8):
-        super(SimuTradeLoss, self).__init__()
-        self.temperature = temperature
-        self.capital = 5e8  # 总资金
-
-    def forward(self, output, target):
-        target = target.to(output.device)
-        buyable_amount = target[:, 4].unsqueeze(-1).float().to(output.device)  # 每只股票最大可买入金额
-        true_yields = target[:, 0].unsqueeze(-1).float().to(output.device)     # 真实收益率
-        predicted_yields = output.unsqueeze(-1).float()                        # 模型预测收益率
-        valid_mask = ~torch.isnan(buyable_amount) & ~torch.isnan(true_yields)  # 过滤掉缺失值
-        buyable_amount = buyable_amount[valid_mask]
-        true_yields = true_yields[valid_mask]
-        predicted_yields = predicted_yields[valid_mask]
-        top500_values, _ = torch.topk(predicted_yields, 500, largest=True, sorted=True)
-        value_500 = top500_values[-1]                                           # 选取 top 500 预测收益率
-        diff = (predicted_yields - value_500) / self.temperature                # 计算 soft 选择权重
-        weights = torch.sigmoid(diff)                                           # 使用 sigmoid 使其平滑可导
-        weighted_profit = torch.sum(buyable_amount * true_yields * weights)     # 计算加权收益
-        total_profit = weighted_profit / self.capital
-        loss = -total_profit                                                    # 取负作为损失
-        return loss
-    
-class SimuTradeCapitalLoss(nn.Module):
-    def __init__(self, capital=5e8, temperature=1e-8, num_iter=5, overused=False):
-        super(SimuTradeCapitalLoss, self).__init__()
-        self.capital = capital
-        self.temperature = temperature
-        self.num_iter = num_iter                                                # 牛顿迭代次数
-        self.overused = overused                                                # 是否对超支进行惩罚
-
-    def forward(self, output, target):
-        target = target.to(output.device)
-        buyable_amount = target[:, 4].unsqueeze(-1).float()                     # 最大可买入金额
-        true_yields = target[:, 0].unsqueeze(-1).float()                        # 真实收益率
-        predicted_yields = output.unsqueeze(-1).float()                         # 预测收益率
-        valid_mask = ~torch.isnan(buyable_amount) & ~torch.isnan(true_yields)   # 过滤掉缺失值
-        buyable_amount = buyable_amount[valid_mask]
-        true_yields = true_yields[valid_mask]
-        predicted_yields = predicted_yields[valid_mask]
-        threshold = torch.median(predicted_yields.detach())                     # 初始化阈值（使用预测收益率的中位数作为初始值）
-        for _ in range(self.num_iter):                                          # 牛顿迭代法求解最优阈值
-            weights = torch.sigmoid((predicted_yields - threshold) / self.temperature)
-            total = torch.sum(weights * buyable_amount)
-            d_weights = weights * (1 - weights) / self.temperature              # 计算导数（自动求导更稳定）
-            derivative = -torch.sum(buyable_amount * d_weights)
-            delta = (total - self.capital) / (derivative.abs() + 1e-8)          # 更新阈值（带学习率衰减）
-            threshold = threshold - delta * 0.5                                 # 加入学习率衰减避免震荡
-        weights = torch.sigmoid((predicted_yields - threshold) / self.temperature)
-        weighted_profit = torch.sum(weights * buyable_amount * true_yields)     # 计算最终权重和收益
-        total_invest = torch.sum(weights * buyable_amount)                      # 添加边界约束惩罚项（可选）
-        if not self.overused:
-            return -weighted_profit / self.capital
-        else:
-            penalty = torch.relu(total_invest - self.capital) ** 2              # 对超支进行惩罚
-            return -weighted_profit / self.capital + 1e-4 * penalty
-        
-def excess_return(output, target):
-    capital = 5e8                                                           # 总资金
-    liquid = target[:, 4].float().to(output.device)
-    _, sort = output.sort(dim=0, descending=True, stable=True)
-    sort = sort.squeeze(1)
-    total_hold = torch.tensor(0.0, device=output.device)
-    total_earned = torch.tensor(0.0, device=output.device)
-    for num, idx in enumerate(sort):
-        if num >= 500:
-            break
-        if (capital - total_hold) < 1:
-            break
-        hold_capital = min(capital - total_hold, liquid[idx])
-        total_hold += hold_capital
-        total_earned += target[idx] * hold_capital
-    total_ret = total_earned / capital
-    return total_ret
-
-class ExcessReturnLoss(nn.Module):
-    def __init__(self, temperature=0.1, capital=5e8, top_k=500):
-        super(ExcessReturnLoss, self).__init__()
-        self.temperature = temperature                              # 控制选择硬度的温度参数
-        self.capital = capital                                      # 总资金量
-        self.top_k = top_k                                          # 选股数量
-
-    def forward(self, output, target):
-        """
-        Args:
-            output: 模型预测收益率 [batch_size, 1]
-            target: 包含真实收益率和流动性的张量 [batch_size, 5]
-                    target[:,0]: 真实收益率
-                    target[:,4]: 每只股票的最大可买入金额
-        Returns:
-            loss: 可微分的损失值
-        """
-        true_yield = target[:, 0].float().to(output.device)         # 真实收益率 [batch_size]
-        liquidity = target[:, 4].float().to(output.device)          # 每只股票可买入上限 [batch_size]
-        pred_yield = output.squeeze()                               # 预测收益率 [batch_size]
-        # 步骤1: 生成选择权重 (可微分的top-k近似)
-        # 计算相对排名得分
-        topk_threshold = pred_yield.topk(self.top_k)[0][-1]  # 第 k 大的值
-        rank_score = torch.sigmoid((pred_yield - topk_threshold) / self.temperature)
-        # 步骤2: 可微分资金分配
-        # 计算每只股票的理论最大购买金额
-        alloc_weight = rank_score * liquidity                   # 权重考虑流动性和选择概率
-        alloc_weight = alloc_weight / (alloc_weight.sum() + 1e-8)   # 归一化
-        # 资金分配
-        allocated = torch.min(alloc_weight * self.capital, liquidity)
-        # 步骤3: 计算预期收益
-        total_profit = (allocated * true_yield).sum() / self.capital
-        loss = -total_profit
-        return loss
-
-
 # 训练函数
-def backward_and_step(n, optimizer, batch_x, batch_group, batch_y, model, early_stop, val_loss_min, loss_func_0, loss_func_1, loss_func_2):
+def backward_and_step(n, optimizer, batch_x, batch_group, batch_y, model, early_stop, val_loss_min, wpcc):
     '''
     训练一个step的函数，带L1正则化，这个正则化系数lambda是比较早调优的结果
     对于不同因子个数情况下以及可能被mask成0的因子比例可能需要用不同大小的lambda
@@ -481,14 +427,10 @@ def backward_and_step(n, optimizer, batch_x, batch_group, batch_y, model, early_
     para val_loss_min: 存储每个训练阶段的最小验证损失。
     '''
     lambda_ = 0.1
-    if n % 5 == 4:
-        loss_func = loss_func_2
-    else:
-        loss_func = loss_func_0
     if early_stop[n] == False:
         # SAM优化器：第一步
         outputs = model(batch_x)
-        loss = loss_func(outputs, batch_y)
+        loss = wpcc(outputs, batch_y)
         return_loss = loss.clone()
         loss = loss + lambda_ * sum(torch.abs(param).sum() for param in model.parameters()) / sum(p.numel() for p in model.parameters())
         loss_grad = torch.autograd.grad(loss, model.parameters(), retain_graph=True)
@@ -497,7 +439,7 @@ def backward_and_step(n, optimizer, batch_x, batch_group, batch_y, model, early_
         optimizer.first_step(zero_grad=True)
         # SAM优化器：第二步
         outputs_second = model(batch_x)
-        loss_second = loss_func(outputs_second, batch_y)
+        loss_second = wpcc(outputs_second, batch_y)
         return_loss = loss_second.clone()
         loss_second = loss_second + lambda_ * sum(torch.abs(param).sum() for param in model.parameters()) / sum(p.numel() for p in model.parameters())
         loss_grad_second = torch.autograd.grad(loss_second, model.parameters(), retain_graph=True)

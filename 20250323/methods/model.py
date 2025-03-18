@@ -481,10 +481,7 @@ def backward_and_step(n, optimizer, batch_x, batch_group, batch_y, model, early_
     para val_loss_min: 存储每个训练阶段的最小验证损失。
     '''
     lambda_ = 0.1
-    if n % 5 == 4:
-        loss_func = loss_func_2
-    else:
-        loss_func = loss_func_0
+    loss_func = loss_func_2
     if early_stop[n] == False:
         # SAM优化器：第一步
         outputs = model(batch_x)
