@@ -271,3 +271,36 @@
 2. 更换0326因子数据
 
 ---
+
+baseline_new: 在ResNet基准模型上用0121数据进行训练
+     -> /home/datamake117/test1101/Data/强相关feature/DL/update_20250417_DT01_38_LZ_resnet_re
+     -> /home/datamake117/test1101/code/因子分组增量推断2_0121_ResNet.py
+     -> /home/datamake117/test1101/Data/强相关feature/DL/update_new_20250417_resnet_re
+20250410: 在含股票标签的ResNet用1209数据进行训练
+20250412: 在含股票标签的ResNet用0121数据进行训练
+20250411: 在MLP基准模型上用1209数据进行训练
+20250414: 在MLP基准模型上用1209数据进行训练
+     -> /home/datamake117/test1101/Data/强相关feature/DL/update_20250417_DT01_38_LZ_MLP_re
+     -> /home/datamake117/test1101/code/因子分组增量推断2_0121_MLP.py
+     -> /home/datamake117/test1101/Data/强相关feature/DL/update_new_20250417_mlp_re
+20250413: 在MLP基准模型上用0121数据进行训练
+20250415: 在MLP基准模型上用0121数据进行训练
+20250416: 在不含mask层的MLP基准模型上用1209数据进行训练
+20250417: 在不含mask层的MLP基准模型上用0121数据进行训练
+
+20250421: 在不含mask层的MLP基准模型上用1031数据进行训练
+20250422: 在ResNet基准模型上用1031数据进行训练
+20250423: 在MLP基准模型上用1031数据进行训练
+
+---
+
+20250506(based on 20250308):
+
+1. 修改WPCC损失函数为成交量加权：self.wpcc_org(output, target, amount)
+
+2. 修改主要因子和辅助因子的模型结构（主要因子单独使用ResNet+主要&辅助因子合并使用ResNet）
+
+3. lower_percentile=0.88, upper_percentile=0.93
+
+---
+

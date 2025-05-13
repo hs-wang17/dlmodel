@@ -125,83 +125,61 @@ def generate_mask(x, corr_thres=0.9):
 # 同时训练的多个模型的子模型，后面其实也可以进一步改成支持时间序列input的LSTM或stockMixer，这个的尝试可能得到下周一了
 # 这里面用来决定因子分组（即每个子模型接收哪些因子）的是一个tensor形式的索引factor_list，可能需要单独存储
 # 用于筛除高相关因子的mask可能也需要单独存储
-class ResBlock(nn.Module):
-    def __init__(self, in_features, out_features):
-        super(ResBlock, self).__init__()
-        self.linear1 = nn.Linear(in_features, out_features)
-        self.bn1 = nn.BatchNorm1d(out_features)
-        self.linear2 = nn.Linear(out_features, out_features)
-        self.bn2 = nn.BatchNorm1d(out_features)
-
-        # 如果输入输出维度不同，需要projection
-        self.shortcut = nn.Sequential()
-        if in_features != out_features:
-            self.shortcut = nn.Sequential(
-                nn.Linear(in_features, out_features),
-                nn.BatchNorm1d(out_features)
-            )
-
-    def forward(self, x):
-        residual = self.shortcut(x)
-        x = F.relu(self.bn1(self.linear1(x)))
-        x = self.bn2(self.linear2(x))
-        x += residual
-        x = F.relu(x)
-        return x
-
 class base_model(nn.Module):
     def __init__(self, output_size=1, drop_out=0.5, mask=None, factor_list=None, seed=1):
         super(base_model, self).__init__()
-        ic_mask = mask.to(dtype=torch.bool)
-        factor_mask = torch.zeros(ic_mask.shape, dtype=torch.bool).to(ic_mask.device)
-        factor_mask[factor_list] = True
-        final_mask = ic_mask & factor_mask  # final_mask是ic_mask和factor_mask的交集
-        # self.selected_factor = torch.nonzero(final_mask).squeeze()  # 获取final_mask的索引
-        self.register_buffer('selected_factor', torch.nonzero(final_mask).squeeze())
-        self.input_bn = nn.BatchNorm1d(self.selected_factor.shape[0])
-        self.input_linear = nn.Linear(self.selected_factor.shape[0], 512)
-        self.res_blocks = nn.Sequential(
-            ResBlock(512, 512),
-            ResBlock(512, 256),
-            ResBlock(256, 128),
-            ResBlock(128, 64)
-        )
-        self.output = nn.Sequential(
-            nn.Dropout(0.2),
+        # self.mask_layer = DynamicMaskLayer(len(mask))
+        # self.mask = mask
+        self.factor_list = factor_list
+        self.register_buffer('selected_factor', torch.nonzero(factor_list).squeeze())
+        self.fc = nn.Sequential(
+            nn.Linear(len(factor_list), 512),
+            nn.LeakyReLU(),
+            nn.Dropout(p=drop_out, inplace=False),
+            nn.BatchNorm1d(512),
+            nn.Linear(512, 256),
+            nn.LeakyReLU(),
+            nn.Dropout(p=drop_out, inplace=False),
+            nn.BatchNorm1d(256),
+            nn.Linear(256, 128),
+            nn.LeakyReLU(),
+            nn.Dropout(p=drop_out, inplace=False),
+            nn.BatchNorm1d(128),
+            nn.Linear(128, 64),
+            nn.LeakyReLU(),
+            nn.Dropout(p=drop_out, inplace=False),
+            nn.BatchNorm1d(64),
             nn.Linear(64, output_size)
         )
         self._initialize_weights(seed)
-    
-    # 模型初始化随机数固定用
+
     def seed_everything(self, seed):
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        
+        random.seed(seed)                               # 设置随机种子
+        np.random.seed(seed)                            # 设置NumPy的随机种子
+        torch.manual_seed(seed)                         # 设置PyTorch的随机种子
+        torch.cuda.manual_seed(seed)                    # 设置CUDA的随机种子
+        torch.cuda.manual_seed_all(seed)                # 设置所有CUDA设备的随机种子
+        torch.backends.cudnn.deterministic = True       # 确保CUDA的行为是确定的
+        torch.backends.cudnn.benchmark = False          # 禁用CUDA的自动优化
+
     def _initialize_weights(self, seed):
-        self.seed_everything(seed)
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm1d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
+        self.seed_everything(seed)                      # 用固定种子初始化
+        for name, param in self.fc.named_parameters():
+            if 'bias' in name:
+                nn.init.constant_(param, 0.0)
+            elif 'weight' in name:
+                if len(param.shape) < 2:
+                    nn.init.xavier_normal_(param.unsqueeze(0), gain=10)
+                else:
+                    nn.init.xavier_normal_(param, gain=10)
 
     def forward(self, x):
+        # x = self.mask_layer(x, self.mask)
         x = x.to(self.selected_factor.device)
-        x = x[:, self.selected_factor]
-        x = self.input_bn(x)
-        x = F.relu(self.input_linear(x))
-        x = self.res_blocks(x)
-        x = self.output(x).squeeze(-1)
-        return x
-
+        x = x[:, self.factor_list]
+        shared_out = self.fc(x.float()).squeeze(-1)
+        return shared_out
+    
 # 负责早停的类
 class EarlyStopping:
     def __init__(self, save_path, logger, patience=10, verbose=True, delta=0, experts_num=6):

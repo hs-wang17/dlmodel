@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from sklearn.metrics import mutual_info_score
 
 
 # SAM（Sharpness-Aware Minimization）优化器
@@ -150,57 +151,87 @@ class ResBlock(nn.Module):
         return x
 
 class base_model(nn.Module):
-    def __init__(self, output_size=1, drop_out=0.5, mask=None, factor_list=None, seed=1):
+    def __init__(self, output_size=1, drop_out=0.2, mask=None, factor_list=None, seed=1):
         super(base_model, self).__init__()
         ic_mask = mask.to(dtype=torch.bool)
         factor_mask = torch.zeros(ic_mask.shape, dtype=torch.bool).to(ic_mask.device)
         factor_mask[factor_list] = True
-        final_mask = ic_mask & factor_mask  # final_mask是ic_mask和factor_mask的交集
-        # self.selected_factor = torch.nonzero(final_mask).squeeze()  # 获取final_mask的索引
-        self.register_buffer('selected_factor', torch.nonzero(final_mask).squeeze())
-        self.input_bn = nn.BatchNorm1d(self.selected_factor.shape[0])
-        self.input_linear = nn.Linear(self.selected_factor.shape[0], 512)
-        self.res_blocks = nn.Sequential(
+        final_mask = ic_mask & factor_mask                          # final_mask是ic_mask和factor_mask的交集
+        self.selected_factor = torch.nonzero(final_mask).squeeze()  # 获取final_mask的索引
+        # 主要特征和次要特征的分离
+        self.main_features = factor_list[:1250]                      # 主要特征是factor_list中的前1250个
+        self.secondary_features = factor_list[1250:]                 # 次要特征是factor_list中的1250以后的部分
+        # 主要特征处理
+        self.input_bn_main = nn.BatchNorm1d(self.main_features.shape[0])
+        self.input_linear_main = nn.Linear(self.main_features.shape[0], 512)
+        self.res_blocks_main = nn.Sequential(
             ResBlock(512, 512),
             ResBlock(512, 256),
             ResBlock(256, 128),
             ResBlock(128, 64)
         )
-        self.output = nn.Sequential(
-            nn.Dropout(0.2),
-            nn.Linear(64, output_size)
+        # 主要特征的输出
+        self.output_main = nn.Sequential(
+            nn.Dropout(drop_out),
+            nn.Linear(64, 16)
         )
+        # 主要特征和次要特征结合的处理
+        self.input_bn_combined = nn.BatchNorm1d(self.selected_factor.shape[0])
+        self.input_linear_combined = nn.Linear(self.selected_factor.shape[0], 512)
+        self.res_blocks_combined = nn.Sequential(
+            ResBlock(512, 512),
+            ResBlock(512, 256),
+            ResBlock(256, 128),
+            ResBlock(128, 64)
+        )
+        # 合并后的输出
+        self.output_combined = nn.Sequential(
+            nn.Dropout(drop_out),
+            nn.Linear(64, 16)
+        )
+        # 新增的一层神经网络，用来合并output_main和output_combined
+        self.merge_layer = nn.Linear(32, output_size)   # 输入是两个输出，合并后得到最终输出
         self._initialize_weights(seed)
-    
-    # 模型初始化随机数固定用
+
     def seed_everything(self, seed):
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        
+        random.seed(seed)                               # 设置随机种子
+        np.random.seed(seed)                            # 设置NumPy的随机种子
+        torch.manual_seed(seed)                         # 设置PyTorch的随机种子
+        torch.cuda.manual_seed(seed)                    # 设置CUDA的随机种子
+        torch.cuda.manual_seed_all(seed)                # 设置所有CUDA设备的随机种子
+        torch.backends.cudnn.deterministic = True       # 确保CUDA的行为是确定的
+        torch.backends.cudnn.benchmark = False          # 禁用CUDA的自动优化
+
     def _initialize_weights(self, seed):
-        self.seed_everything(seed)
+        self.seed_everything(seed)                      # 用固定种子初始化
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight)
+                nn.init.kaiming_normal_(m.weight)       # 对全连接层进行Kaiming Normal初始化
                 if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
+                    nn.init.constant_(m.bias, 0)        # 初始化偏置为0
             elif isinstance(m, nn.BatchNorm1d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1)          # 批量归一化的权重初始化为1
+                nn.init.constant_(m.bias, 0)            # 批量归一化的偏置初始化为0
 
     def forward(self, x):
-        x = x.to(self.selected_factor.device)
-        x = x[:, self.selected_factor]
-        x = self.input_bn(x)
-        x = F.relu(self.input_linear(x))
-        x = self.res_blocks(x)
-        x = self.output(x).squeeze(-1)
-        return x
+        x = x.to(self.selected_factor.device)           # 将输入移动到正确的设备
+        x_main = x[:, self.main_features]               # 提取主要特征（factor_list中的前1250个）
+        x_combined = x[:, self.selected_factor]
+        # 主要特征的处理
+        x_main = self.input_bn_main(x_main)
+        x_main = F.relu(self.input_linear_main(x_main))
+        x_main = self.res_blocks_main(x_main)
+        output_main = self.output_main(x_main).squeeze(-1)
+        # 主要特征和次要特征的结合处理
+        x_combined = self.input_bn_combined(x_combined)
+        x_combined = F.relu(self.input_linear_combined(x_combined))
+        x_combined = self.res_blocks_combined(x_combined)
+        output_combined = self.output_combined(x_combined).squeeze(-1)
+        # 使用merge_layer合并两个输出
+        output = torch.cat((output_main, output_combined), dim=1)
+        final_output = self.merge_layer(output).squeeze(-1)
+        return final_output
+
 
 # 负责早停的类
 class EarlyStopping:
@@ -302,17 +333,16 @@ class PartialCosLoss(nn.Module):
     def forward(self, output, target):
         amount = target[:, 4].float().to(output.device)
         target = target[:, 0].float().to(output.device)
-        return self.wpcc_org(output, target, output)  # amount
+        return self.wpcc_org(output, target, amount)  # amount
 
 # 既可以调整成损失又可以当验证集等指标的模拟交易收益，这个目前是在测试集每周选一次模型中用到
 def simu_trade(output, target):
-    capital = 5e8  # 总资金
+    capital = 5e8                                                           # 总资金
     target = target.to(output.device)
-    buyable_amount = target[:, 4].unsqueeze(-1).float().to(output.device)  # 每只股票最大可买入的资金数额
-    true_yields = target[:, 0].unsqueeze(-1).float().to(output.device)  # 每只股票的真实收益率
-    predicted_yields = output.unsqueeze(-1).float()  # 模型预测的收益率
-    # 过滤掉缺失值对应的数据
-    valid_mask = ~torch.isnan(buyable_amount) & ~torch.isnan(true_yields)
+    buyable_amount = target[:, 4].unsqueeze(-1).float().to(output.device)   # 每只股票最大可买入的资金数额
+    true_yields = target[:, 0].unsqueeze(-1).float().to(output.device)      # 每只股票的真实收益率
+    predicted_yields = output.unsqueeze(-1).float()                         # 模型预测的收益率
+    valid_mask = ~torch.isnan(buyable_amount) & ~torch.isnan(true_yields)   # 过滤掉缺失值对应的数据
     buyable_amount = buyable_amount[valid_mask]
     true_yields = true_yields[valid_mask]
     predicted_yields = predicted_yields[valid_mask]
@@ -320,7 +350,7 @@ def simu_trade(output, target):
     value_500 = top500_values[-1]
     buy_amount = buyable_amount[predicted_yields >= value_500]
     true_yields = true_yields[predicted_yields >= value_500]
-    total_profit = torch.sum(buy_amount * true_yields) / capital  # 计算总收益率：股票收益总和 / 总资金
+    total_profit = torch.sum(buy_amount * true_yields) / capital            # 计算总收益率：股票收益总和 / 总资金
     return total_profit
 
 # 训练函数
@@ -331,6 +361,7 @@ def backward_and_step(n, optimizer, batch_x, batch_group, batch_y, model, early_
     para n: 当前训练的步数或迭代索引。
     para optimizer: 用于优化模型参数的优化器（例如 Adam）。
     para batch_x: 当前批次的输入数据。
+    TODO: 增加使用para batch_group数据。
     para batch_y: 当前批次的目标标签。
     para model: 训练的模型（例如神经网络）。
     para early_stop: 早期停止的标志，用于在训练达到一定标准后提前停止训练。
@@ -359,3 +390,79 @@ def backward_and_step(n, optimizer, batch_x, batch_group, batch_y, model, early_
     else:
         return_loss = val_loss_min[n]
     return return_loss.to(torch.device("cuda:0"))
+
+# 辅助因子平衡K均值聚类
+class BalancedKMeans:
+    def __init__(self, n_clusters, random_state=42, max_iter=200):
+        self.n_clusters = n_clusters
+        self.random_state = random_state
+        self.max_iter = max_iter
+        
+    def fit_predict(self, X):
+        X = np.array(X)
+        n_samples = X.shape[0]
+        max_size = (n_samples + self.n_clusters - 1) // self.n_clusters
+        np.random.seed(self.random_state)
+        centers = X[np.random.choice(n_samples, self.n_clusters, replace=False)]
+        for _ in range(self.max_iter):
+            dists = np.linalg.norm(X[:, None] - centers, axis=2)
+            clusters = -np.ones(n_samples, dtype=int)
+            for i in np.argsort(np.min(dists, axis=1)):
+                closest = np.argmin(dists[i])
+                if np.sum(clusters == closest) < max_size:
+                    clusters[i] = closest
+                else:
+                    mask = np.arange(self.n_clusters) != closest
+                    valid_centers = np.where(mask)[0]
+                    next_best = valid_centers[np.argmin(dists[i, mask])]
+                    clusters[i] = next_best
+            new_centers = np.array([X[clusters == k].mean(axis=0) for k in range(self.n_clusters)])
+            if np.allclose(centers, new_centers):
+                break
+            centers = new_centers
+        return clusters
+
+# 基于多种距离度量的辅助因子平衡K均值聚类
+class BalancedKMeansMetric:
+    def __init__(self, n_clusters, metric='euclidean', random_state=42, max_iter=200, covariance_matrix=None):
+        self.n_clusters = n_clusters
+        self.metric = metric
+        self.random_state = random_state
+        self.max_iter = max_iter
+        self.covariance_matrix = covariance_matrix
+        
+    def fit_predict(self, X):
+        X = np.array(X)
+        n_samples = X.shape[0]
+        max_size = (n_samples + self.n_clusters - 1) // self.n_clusters
+        np.random.seed(self.random_state)
+        centers = X[np.random.choice(n_samples, self.n_clusters, replace=False)]
+        # 选择不同的度量方法
+        if self.metric == 'euclidean':
+            dist_func = lambda x, c: np.linalg.norm(x - c, axis=1)
+        elif self.metric == 'manhattan':
+            dist_func = lambda x, c: np.sum(np.abs(x - c), axis=1)
+        elif self.metric == 'cosine':
+            dist_func = lambda x, c: 1 - np.dot(x, c) / (np.linalg.norm(x) * np.linalg.norm(c))
+        else:
+            raise ValueError(f"Unsupported metric: {self.metric}")
+        for _ in range(self.max_iter):
+            # 计算度量矩阵
+            similarities = np.array([dist_func(X, center) for center in centers]).T
+            clusters = -np.ones(n_samples, dtype=int)
+            for i in np.argsort(np.min(similarities, axis=1)):
+                closest = np.argmin(similarities[i])
+                if np.sum(clusters == closest) < max_size:
+                    clusters[i] = closest
+                else:
+                    mask = np.arange(self.n_clusters) != closest
+                    valid_centers = np.where(mask)[0]
+                    next_best = valid_centers[np.argmin(similarities[i, mask])]
+                    clusters[i] = next_best
+            # 更新聚类中心
+            new_centers = np.array([X[clusters == k].mean(axis=0) for k in range(self.n_clusters)])
+            if np.allclose(centers, new_centers):
+                break
+            centers = new_centers
+        return clusters
+    

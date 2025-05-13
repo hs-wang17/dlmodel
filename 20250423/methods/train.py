@@ -189,6 +189,8 @@ def train_one_Fold(
     model_path = os.path.join(save_path, path_name)
     test_path = os.path.join(save_path, test_name)
     
+    print(test_path)
+    
     for n in range(multi_model):
         model_list[n].eval()
     with torch.no_grad():
@@ -232,6 +234,8 @@ def train_one_Fold(
         test_outputs = torch.cat(test_outputs_list).cpu()
         test_loss = torch.tensor(test_loss_list)
         torch.save(test_outputs, test_path)
+        
+        print('Save torch test outputs to ' + test_path)
 
     logger.info(f"Test Loss: {test_loss.mean().cpu():.6f}")
     

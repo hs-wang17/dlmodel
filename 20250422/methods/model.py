@@ -202,6 +202,58 @@ class base_model(nn.Module):
         x = self.output(x).squeeze(-1)
         return x
 
+
+class base_model(nn.Module):
+    def __init__(self, output_size=1, drop_out=0.5, mask=None, factor_list=None, seed=1):
+        super(base_model, self).__init__()
+        ic_mask = mask.to(dtype=torch.bool)
+        factor_mask = torch.zeros(ic_mask.shape, dtype=torch.bool).to(ic_mask.device)
+        factor_mask[factor_list] = True
+        final_mask = ic_mask & factor_mask
+        self.register_buffer('selected_factor', torch.nonzero(final_mask).squeeze())
+        self.input_bn = nn.BatchNorm1d(self.selected_factor.shape[0])
+        self.input_linear = nn.Linear(self.selected_factor.shape[0], 512)
+        self.res_blocks = nn.Sequential(
+            ResBlock(512, 512),
+            ResBlock(512, 256),
+            ResBlock(256, 128),
+            ResBlock(128, 64)
+        )
+        self.output = nn.Sequential(
+            nn.Dropout(0.2),
+            nn.Linear(64, output_size)
+        )
+        self._initialize_weights(seed)
+        
+    def seed_everything(self, seed):
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        
+    def _initialize_weights(self,seed):
+        self.seed_everything(seed)
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        x = x.to(self.selected_factor.device)
+        x = x[:,self.selected_factor]
+        x = self.input_bn(x)
+        x = F.relu(self.input_linear(x))
+        x = self.res_blocks(x)
+        x = self.output(x).squeeze(-1)
+        return x
+    
 # 负责早停的类
 class EarlyStopping:
     def __init__(self, save_path, logger, patience=10, verbose=True, delta=0, experts_num=6):
