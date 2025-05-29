@@ -2,7 +2,7 @@ import numpy as np
 
 
 # 根据流动性调整收益率前7%-10%附近的训练标签，给的默认参数应该就是之前测试的效果比较好的
-def adjust_daily_returns(returns, liquidity, threshold=0.01, lower_percentile=0.88, upper_percentile=0.93):
+def adjust_daily_returns(returns, liquidity, threshold=0.01, lower_percentile=0.88, upper_percentile=0.95):
     """
     思路：收益率接近的一组股票按照流动性从高到低重新分配调整后的收益率。
     根据流动性调整收益率，但仅针对真实收益率处于指定分位数范围内的部分。

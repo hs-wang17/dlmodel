@@ -2,7 +2,7 @@ import numpy as np
 
 
 # 根据流动性调整收益率前7%-10%附近的训练标签，给的默认参数应该就是之前测试的效果比较好的
-def adjust_daily_returns(returns, liquidity, threshold=0.01, lower_percentile=0.88, upper_percentile=0.93):
+def adjust_daily_returns(returns, liquidity, threshold=0.01, lower_percentile=0.90, upper_percentile=0.93):
     """
     思路：收益率接近的一组股票按照流动性从高到低重新分配调整后的收益率。
     根据流动性调整收益率，但仅针对真实收益率处于指定分位数范围内的部分。
@@ -27,6 +27,7 @@ def adjust_daily_returns(returns, liquidity, threshold=0.01, lower_percentile=0.
     # Step 2: 筛选处于分位数范围内的收益率
     in_range_mask = (valid_returns >= lower_bound) & (valid_returns <= upper_bound)
     if not np.any(in_range_mask):  # 如果分位数范围内没有数据，则直接返回原数组
+        print(1)
         return returns
     in_range_indices = np.where(in_range_mask)[0]
     in_range_returns = valid_returns[in_range_mask]
@@ -64,6 +65,11 @@ def adjust_daily_returns(returns, liquidity, threshold=0.01, lower_percentile=0.
     # Step 5: 将调整后的部分还原到原始索引中
     final_adjusted_returns = returns.copy()
     final_adjusted_returns[valid_mask] = valid_returns  # 初始化为原值 
-    final_adjusted_returns[valid_mask][in_range_indices] = adjusted_returns  # 覆盖调整部分
+    global_indices = np.where(valid_mask)[0][in_range_indices]  # 找到在 returns 原始数组中的真实位置
+    final_adjusted_returns[global_indices] = adjusted_returns  # 覆盖调整部分
+    
+    print(returns[valid_mask][in_range_indices][:10])
+    print(adjusted_returns[:10])
+    print(final_adjusted_returns[valid_mask][in_range_indices][:10])
 
     return final_adjusted_returns
